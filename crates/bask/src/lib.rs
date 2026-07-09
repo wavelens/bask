@@ -24,6 +24,9 @@ mod scheduler;
 mod task;
 mod worker;
 
+#[cfg(feature = "formats")]
+pub mod formats;
+
 pub use aggregator::Aggregator;
 pub use context::Context;
 pub use dedup::Dedup;
