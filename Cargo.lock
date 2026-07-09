@@ -3,6 +3,7 @@
 version = 4
 
 [[package]]
+<<<<<<< Updated upstream
 name = "anyhow"
 version = "1.0.103"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -20,6 +21,8 @@ dependencies = [
 ]
 
 [[package]]
+=======
+>>>>>>> Stashed changes
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -28,22 +31,30 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 [[package]]
 name = "bask"
 version = "0.1.0"
+<<<<<<< Updated upstream
 dependencies = [
  "anyhow",
  "async-trait",
  "thiserror",
  "tokio",
 ]
+=======
+>>>>>>> Stashed changes
 
 [[package]]
 name = "bask-python"
 version = "0.1.0"
 dependencies = [
+<<<<<<< Updated upstream
  "anyhow",
  "async-trait",
  "bask",
  "pyo3",
  "tokio",
+=======
+ "bask",
+ "pyo3",
+>>>>>>> Stashed changes
 ]
 
 [[package]]
@@ -89,12 +100,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
+<<<<<<< Updated upstream
 name = "pin-project-lite"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
+=======
+>>>>>>> Stashed changes
 name = "portable-atomic"
 version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -205,6 +219,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
 
 [[package]]
+<<<<<<< Updated upstream
 name = "thiserror"
 version = "2.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -246,6 +261,8 @@ dependencies = [
 ]
 
 [[package]]
+=======
+>>>>>>> Stashed changes
 name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"

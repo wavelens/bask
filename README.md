@@ -1,6 +1,6 @@
-# bask
+# Bask
 
-> Build any data pipeline as of tasks and workers.
+> **B**uild T**ask**s
 
 ```mermaid
 flowchart TD
@@ -20,6 +20,53 @@ flowchart TD
     A --> F[finalize]
     Z --> F
     F --> OUT([RunReport · outputs])
+```
+
+## Python
+
+```python
+from bask import Engine
+
+
+class Document:
+    def __init__(self, text):
+        self.text = text
+
+
+class Word:
+    def __init__(self, value):
+        self.value = value
+
+
+engine = Engine()
+
+
+@engine.worker(Document)
+def split(doc, ctx):
+    for word in doc.text.split():
+        ctx.emit(Word(word.lower()))
+
+
+@engine.worker(Word)
+def count(word, ctx):
+    ctx.aggregate(WordCount, word.value)
+
+
+@engine.aggregator
+class WordCount:
+    def __init__(self):
+        self.counts = {}
+
+    def fold(self, word):
+        self.counts[word] = self.counts.get(word, 0) + 1
+
+    def finalize(self):
+        return self.counts
+
+
+engine.seed(Document("the quick brown fox the fox"))
+report = engine.run()
+print(report.output(WordCount))
 ```
 
 ## Rust
@@ -79,49 +126,6 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-## Python
+## Acknowledgements
 
-```python
-from bask import Engine
-
-
-class Document:
-    def __init__(self, text):
-        self.text = text
-
-
-class Word:
-    def __init__(self, value):
-        self.value = value
-
-
-engine = Engine()
-
-
-@engine.worker(Document)
-def split(doc, ctx):
-    for word in doc.text.split():
-        ctx.emit(Word(word.lower()))
-
-
-@engine.worker(Word)
-def count(word, ctx):
-    ctx.aggregate(WordCount, word.value)
-
-
-@engine.aggregator
-class WordCount:
-    def __init__(self):
-        self.counts = {}
-
-    def fold(self, word):
-        self.counts[word] = self.counts.get(word, 0) + 1
-
-    def finalize(self):
-        return self.counts
-
-
-engine.seed(Document("the quick brown fox the fox"))
-report = engine.run()
-print(report.output(WordCount))
-```
+Developed by Wavelens GmbH. Support us by contributing.
