@@ -6,4 +6,4 @@ members = ["crates/bask", "crates/bask-python"]
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-authors = ["Dennis Wuitz <dennish@wuitz.de>"]
+authors = ["Wavelens GmbH <info@wavelens.io>"]
