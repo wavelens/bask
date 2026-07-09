@@ -1,0 +1,14 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "bask"
+requires-python = ">=3.9"
+license = "MIT OR Apache-2.0"
+dynamic = ["version"]
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+python-source = "python"
+module-name = "bask._bask"

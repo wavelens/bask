@@ -1,0 +1,14 @@
+[package]
+name = "bask-python"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+name = "_bask"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+bask = { path = "../bask" }
+pyo3 = { version = "0.24", features = ["abi3-py39"] }
