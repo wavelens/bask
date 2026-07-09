@@ -10,3 +10,12 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 async-trait = "0.1"
 anyhow = "1"
 thiserror = "2"
+arrow = { version = "59", optional = true }
+parquet = { version = "59", features = ["arrow"], optional = true }
+
+[features]
+formats = ["dep:arrow", "dep:parquet"]
+
+[[example]]
+name = "streaming"
+required-features = ["formats"]
