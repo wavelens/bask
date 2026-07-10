@@ -12,13 +12,13 @@ use std::time::Duration;
 
 use tokio::sync::Semaphore;
 
-use crate::aggregator::{Aggregator, Aggregators};
 use crate::dedup::{Dedup, Dedups};
 use crate::interrupt::Shutdown;
 use crate::monitor::Monitor;
 use crate::registry::{Group, Instance, Registry};
 use crate::report::RunReport;
 use crate::retry::RetryPolicy;
+use crate::router::{Router, Routers};
 use crate::scheduler::{self, Interrupt};
 use crate::task::{Envelope, RouteKey, Task};
 use crate::worker::{DynWorker, Holder, Worker, WorkerCfg};
@@ -31,12 +31,12 @@ struct InstanceSpec {
     type_name: &'static str,
 }
 
-type AggFactory = Box<dyn FnOnce(&mut Aggregators, usize)>;
+type RouterFactory = Box<dyn FnOnce(&mut Routers, usize)>;
 type DedupFactory = Box<dyn FnOnce(&mut Dedups, usize)>;
 
 pub struct EngineBuilder {
     specs: HashMap<RouteKey, Vec<InstanceSpec>>,
-    aggregators: Vec<AggFactory>,
+    routers: Vec<RouterFactory>,
     dedups: Vec<DedupFactory>,
     retry: RetryPolicy,
     concurrency: usize,
@@ -52,7 +52,7 @@ pub struct EngineBuilder {
 
 pub struct Engine {
     registry: Registry,
-    aggregators: Aggregators,
+    routers: Routers,
     dedups: Dedups,
     retry: RetryPolicy,
     concurrency: usize,
@@ -67,7 +67,7 @@ impl Engine {
     pub fn builder() -> EngineBuilder {
         EngineBuilder {
             specs: HashMap::new(),
-            aggregators: Vec::new(),
+            routers: Vec::new(),
             dedups: Vec::new(),
             retry: RetryPolicy::default(),
             concurrency: default_parallelism(),
@@ -85,7 +85,7 @@ impl Engine {
     pub async fn run(self) -> crate::Result<RunReport> {
         scheduler::run(
             Arc::new(self.registry),
-            Arc::new(self.aggregators),
+            Arc::new(self.routers),
             Arc::new(self.dedups),
             self.retry,
             self.concurrency,
@@ -153,11 +153,11 @@ impl EngineBuilder {
         self
     }
 
-    pub fn aggregator<A: Aggregator>(mut self) -> Self {
-        self.aggregators
-            .push(Box::new(|aggs: &mut Aggregators, shards| {
-                aggs.insert::<A>(shards)
-            }));
+    /// Register a router; feed it from a worker with [`Context::route`](crate::Context::route).
+    pub fn router<R: Router>(mut self) -> Self {
+        self.routers.push(Box::new(|routers: &mut Routers, shards| {
+            routers.insert::<R>(shards)
+        }));
         self
     }
 
@@ -273,9 +273,9 @@ impl EngineBuilder {
                 },
             );
         }
-        let mut aggregators = Aggregators::default();
-        for factory in self.aggregators {
-            factory(&mut aggregators, concurrency);
+        let mut routers = Routers::default();
+        for factory in self.routers {
+            factory(&mut routers, concurrency);
         }
         let mut dedups = Dedups::default();
         for factory in self.dedups {
@@ -283,7 +283,7 @@ impl EngineBuilder {
         }
         Engine {
             registry,
-            aggregators,
+            routers,
             dedups,
             retry: self.retry,
             concurrency,

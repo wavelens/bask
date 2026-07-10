@@ -6,17 +6,17 @@
 
 use std::sync::Arc;
 
-use crate::aggregator::{Aggregator, Aggregators};
 use crate::dedup::{Dedup, Dedups};
 use crate::interrupt::{Cancel, Cancellation};
+use crate::router::{Emit, Router, Routers};
 use crate::scheduler::{InFlight, Queue, RunSlot, Sent};
 use crate::task::{Envelope, Task};
 
-/// Handed to every worker. Its only powers: spawn more work, contribute to aggregation.
+/// Handed to every worker. Its only powers: spawn more work, feed the routing plane.
 pub struct Context {
     pub(crate) queue: Queue,
     pub(crate) in_flight: Arc<InFlight>,
-    pub(crate) aggregators: Arc<Aggregators>,
+    pub(crate) routers: Arc<Routers>,
     pub(crate) dedups: Arc<Dedups>,
     pub(crate) shard: usize,
     pub(crate) run: Arc<RunSlot>,
@@ -28,8 +28,12 @@ impl Context {
     /// on a full queue the worker yields its run permit so the dispatcher can drain,
     /// then reacquires it before returning, which keeps memory bounded without deadlock.
     pub async fn emit<T: Task>(&self, task: T) -> crate::Result<()> {
+        self.emit_envelope(Envelope::new(task)).await
+    }
+
+    async fn emit_envelope(&self, env: Envelope) -> crate::Result<()> {
         self.in_flight.inc();
-        match self.queue.try_send(Envelope::new(task)) {
+        match self.queue.try_send(env) {
             Sent::Ok => Ok(()),
             Sent::Full(env) => {
                 self.run.release();
@@ -50,9 +54,15 @@ impl Context {
         }
     }
 
-    /// Contribute a value to an aggregator registered on the engine.
-    pub fn aggregate<A: Aggregator>(&self, input: A::Input) {
-        self.aggregators.fold::<A>(self.shard, input);
+    /// Feed one input to a router registered on the engine: it folds into sharded state
+    /// and may emit derived tasks, which are enqueued here under the same backpressure.
+    pub async fn route<R: Router>(&self, input: R::Input) -> crate::Result<()> {
+        let mut out = Emit::default();
+        self.routers.route::<R>(self.shard, input, &mut out);
+        for env in std::mem::take(&mut out.envelopes) {
+            self.emit_envelope(env).await?;
+        }
+        Ok(())
     }
 
     /// Test-and-set against a dedup set: `true` the first time `key` is seen, `false`

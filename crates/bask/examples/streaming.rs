@@ -58,17 +58,17 @@ impl Worker for Summer {
             .downcast_ref::<Int64Array>()
             .expect("int64 column");
         let sum: i64 = column.iter().flatten().sum();
-        ctx.aggregate::<Total>((batch.0.num_rows() as u64, sum));
+        ctx.route::<Total>((batch.0.num_rows() as u64, sum)).await?;
         Ok(())
     }
 }
 
 struct Total;
-impl Aggregator for Total {
+impl Router for Total {
     type Input = (u64, i64);
     type State = (u64, i64);
     type Output = (u64, i64);
-    fn fold(state: &mut Self::State, input: Self::Input) {
+    fn route(state: &mut Self::State, input: Self::Input, _out: &mut Emit) {
         state.0 += input.0;
         state.1 += input.1;
     }
@@ -95,7 +95,7 @@ async fn main() -> anyhow::Result<()> {
     let report = Engine::builder()
         .worker(Reader)
         .worker(Summer)
-        .aggregator::<Total>()
+        .router::<Total>()
         .seed(ReadFile {
             path: path.clone(),
             chunk_rows: 1024,

@@ -7,10 +7,9 @@
 //! Bask - Build Tasks
 //!
 //! Two orthogonal planes: a compute plane of independent [`Worker`]s that consume
-//! typed [`Task`]s and emit more, and an aggregation plane of [`Aggregator`]s that
-//! collect results outside the worker graph.
+//! typed [`Task`]s and emit more, and a routing plane of [`Router`]s that fold a task
+//! stream into state and may emit, route, filter, or batch derived tasks.
 
-mod aggregator;
 mod context;
 mod dedup;
 mod engine;
@@ -21,6 +20,7 @@ mod monitor;
 mod registry;
 mod report;
 mod retry;
+mod router;
 mod scheduler;
 mod task;
 mod worker;
@@ -31,7 +31,6 @@ pub mod io;
 #[cfg(feature = "formats")]
 pub mod formats;
 
-pub use aggregator::Aggregator;
 pub use context::Context;
 pub use dedup::Dedup;
 pub use engine::{Engine, EngineBuilder};
@@ -41,14 +40,15 @@ pub use metrics::{Snapshot, WorkerStat};
 pub use monitor::{LiveConsole, Monitor};
 pub use report::{RunReport, Stats, TaskFailure};
 pub use retry::{Backoff, InstanceChoice, RetryPolicy};
+pub use router::{Emit, Router};
 pub use scheduler::Emitter;
 pub use task::Task;
 pub use worker::{DynWorker, Worker, WorkerCfg};
 
 pub mod prelude {
     pub use crate::{
-        Aggregator, Backoff, Context, Dedup, Engine, InstanceChoice, LiveConsole, Monitor,
-        RetryPolicy, RunReport, Shutdown, Snapshot, Task, Worker, WorkerCfg,
+        Backoff, Context, Dedup, Emit, Engine, InstanceChoice, LiveConsole, Monitor, RetryPolicy,
+        Router, RunReport, Shutdown, Snapshot, Task, Worker, WorkerCfg,
     };
     pub use anyhow;
     pub use async_trait::async_trait;
