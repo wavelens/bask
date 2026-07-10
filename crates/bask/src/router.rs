@@ -23,6 +23,18 @@ impl Emit {
         self.envelopes.push(Envelope::new(task));
     }
 
+    /// Emit a dynamically-typed task for a front-end that routes by its own type system
+    /// (e.g. the Python bindings flushing their routers).
+    pub fn emit_dyn(
+        &mut self,
+        key: u64,
+        type_name: &'static str,
+        payload: Box<dyn std::any::Any + Send + Sync>,
+    ) {
+        self.envelopes
+            .push(Envelope::new_dyn(key, type_name, payload));
+    }
+
     pub fn is_empty(&self) -> bool {
         self.envelopes.is_empty()
     }

@@ -18,7 +18,7 @@ use crate::monitor::Monitor;
 use crate::registry::{Group, Instance, Registry};
 use crate::report::RunReport;
 use crate::retry::RetryPolicy;
-use crate::router::{Router, Routers};
+use crate::router::{Emit, Router, Routers};
 use crate::scheduler::{self, Interrupt};
 use crate::task::{Envelope, RouteKey, Task};
 use crate::worker::{DynWorker, Holder, Worker, WorkerCfg};
@@ -48,6 +48,7 @@ pub struct EngineBuilder {
     seeds: Vec<Envelope>,
     monitor: Option<Box<dyn Monitor>>,
     sample_interval: Duration,
+    flush_hook: Option<scheduler::FlushHook>,
 }
 
 pub struct Engine {
@@ -61,6 +62,7 @@ pub struct Engine {
     seeds: Vec<Envelope>,
     monitor: Option<Box<dyn Monitor>>,
     sample_interval: Duration,
+    flush_hook: Option<scheduler::FlushHook>,
 }
 
 impl Engine {
@@ -79,6 +81,7 @@ impl Engine {
             seeds: Vec::new(),
             monitor: None,
             sample_interval: Duration::from_millis(200),
+            flush_hook: None,
         }
     }
 
@@ -94,6 +97,7 @@ impl Engine {
             self.seeds,
             self.monitor,
             self.sample_interval,
+            self.flush_hook,
         )
         .await
     }
@@ -158,6 +162,13 @@ impl EngineBuilder {
         self.routers.push(Box::new(|routers: &mut Routers, shards| {
             routers.insert::<R>(shards)
         }));
+        self
+    }
+
+    /// Run a callback once per flush epoch so a dynamic front-end can contribute buffered
+    /// emissions from routers the core cannot name (used by the Python bindings).
+    pub fn flush_hook<F: FnMut(&mut Emit) + Send + 'static>(mut self, hook: F) -> Self {
+        self.flush_hook = Some(Box::new(hook));
         self
     }
 
@@ -292,6 +303,7 @@ impl EngineBuilder {
             seeds: self.seeds,
             monitor: self.monitor,
             sample_interval: self.sample_interval,
+            flush_hook: self.flush_hook,
         }
     }
 
