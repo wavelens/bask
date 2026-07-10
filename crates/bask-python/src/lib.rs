@@ -17,9 +17,86 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
 use bask::{
-    Backoff, Cancellation, Context, DynWorker, Emitter, LiveConsole, RetryPolicy, Shutdown,
-    WorkerCfg,
+    Backoff, Cancellation, Context, DeadLetter, DeadLetterSink, DynWorker, Emitter, LiveConsole,
+    RetryExt, RetryOn, RetryPolicy, Shutdown, WorkerCfg,
 };
+
+/// A retry hint a Python worker attaches to its exception via `_bask_retry`, mapped onto
+/// the Rust [`RetryOn`]. The predicate variant (`AnyWith`) is Rust-only.
+enum HintTag {
+    Fatal,
+    SameInstance,
+    DifferentInstance,
+    DifferentAttr(String),
+}
+
+impl From<HintTag> for RetryOn {
+    fn from(tag: HintTag) -> Self {
+        match tag {
+            HintTag::Fatal => RetryOn::Fatal,
+            HintTag::SameInstance => RetryOn::SameInstance,
+            HintTag::DifferentInstance => RetryOn::DifferentInstance,
+            HintTag::DifferentAttr(key) => RetryOn::DifferentAttr(key),
+        }
+    }
+}
+
+/// How a Python `process` call failed: its message and any retry hint it carried.
+struct WorkerFail {
+    message: String,
+    hint: Option<HintTag>,
+}
+
+/// Read the `_bask_retry` tag a raised exception may carry (e.g. `("different_attr", "gpu")`).
+fn hint_from_pyerr(py: Python<'_>, err: &PyErr) -> Option<HintTag> {
+    let tag = err.value(py).as_any().getattr("_bask_retry").ok()?;
+    if tag.is_none() {
+        return None;
+    }
+    let parts: Vec<String> = tag.extract().ok()?;
+    Some(match parts.first()?.as_str() {
+        "fatal" => HintTag::Fatal,
+        "same_instance" => HintTag::SameInstance,
+        "different_instance" => HintTag::DifferentInstance,
+        "different_attr" => HintTag::DifferentAttr(parts.get(1)?.clone()),
+        _ => return None,
+    })
+}
+
+/// Build a Rust retry policy from the Python `Retry` scalars.
+fn make_retry(max_attempts: u32, avoid_failed: bool, backoff_ms: u64, jitter: f64) -> RetryPolicy {
+    let mut retry = RetryPolicy::new().max_attempts(max_attempts);
+    retry = if avoid_failed {
+        retry.avoid_failed()
+    } else {
+        retry.any_instance()
+    };
+    if backoff_ms > 0 {
+        retry = retry.backoff(Backoff::Fixed(Duration::from_millis(backoff_ms)));
+    }
+    retry.jitter(jitter)
+}
+
+/// A dead-letter sink that calls back into Python with the failed task and its error.
+struct PyDeadLetter {
+    callback: Py<PyAny>,
+}
+
+impl DeadLetterSink for PyDeadLetter {
+    fn dead_letter(&self, letter: DeadLetter) {
+        Python::attach(|py| {
+            let dict = PyDict::new(py);
+            if let Some(task) = letter.payload.downcast_ref::<Py<PyAny>>() {
+                let _ = dict.set_item("task", task.clone_ref(py));
+            }
+            let _ = dict.set_item("task_type", letter.task_type);
+            let _ = dict.set_item("error", letter.error);
+            let _ = dict.set_item("attempts", letter.attempts);
+            let _ = dict.set_item("instance", letter.instance);
+            let _ = self.callback.bind(py).call1((dict,));
+        });
+    }
+}
 
 /// Interns a Python class name to a `'static` string, keyed by the class pointer.
 /// The set of task classes is small and lives for the process, so leaking once is fine.
@@ -71,7 +148,7 @@ impl DynWorker for PyWorker {
 
         // Run the (blocking) Python call off the async worker threads so the router
         // is never starved; the GIL still serializes Python execution.
-        let outcome = tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let outcome = tokio::task::spawn_blocking(move || -> Result<(), WorkerFail> {
             Python::attach(|py| {
                 let ctx = Bound::new(
                     py,
@@ -82,11 +159,17 @@ impl DynWorker for PyWorker {
                         dedups,
                     },
                 )
-                .map_err(|e| e.to_string())?;
-                process
-                    .bind(py)
-                    .call1((task.bind(py), ctx))
-                    .map_err(|e| e.to_string())?;
+                .map_err(|e| WorkerFail {
+                    message: e.to_string(),
+                    hint: None,
+                })?;
+                process.bind(py).call1((task.bind(py), ctx)).map_err(|e| {
+                    let hint = hint_from_pyerr(py, &e);
+                    WorkerFail {
+                        message: e.to_string(),
+                        hint,
+                    }
+                })?;
                 Ok(())
             })
         })
@@ -94,7 +177,13 @@ impl DynWorker for PyWorker {
 
         match outcome {
             Ok(Ok(())) => Ok(()),
-            Ok(Err(message)) => Err(anyhow::anyhow!(message)),
+            Ok(Err(fail)) => {
+                let res: anyhow::Result<()> = Err(anyhow::anyhow!(fail.message));
+                match fail.hint {
+                    Some(tag) => res.retry_on(tag.into()),
+                    None => res,
+                }
+            }
             Err(join) => Err(anyhow::anyhow!("worker thread panicked: {join}")),
         }
     }
@@ -187,6 +276,9 @@ struct Registration {
     label: Option<String>,
     concurrency: Option<usize>,
     timeout_ms: Option<u64>,
+    attrs: Vec<(String, String)>,
+    requires: Vec<String>,
+    retry: Option<(u32, bool, u64, f64)>,
 }
 
 struct Seed {
@@ -227,11 +319,14 @@ struct Engine {
     max_attempts: u32,
     avoid_failed: bool,
     backoff_ms: u64,
+    jitter: f64,
     sample_interval_ms: u64,
     queue_capacity: Option<usize>,
     timeout_ms: Option<u64>,
     grace_ms: Option<u64>,
     catch_ctrl_c: bool,
+    resources: HashMap<String, usize>,
+    dead_letter: Option<Py<PyAny>>,
     registrations: Vec<Registration>,
     seeds: Vec<Seed>,
 }
@@ -239,35 +334,42 @@ struct Engine {
 #[pymethods]
 impl Engine {
     #[new]
-    #[pyo3(signature = (concurrency, max_attempts=1, avoid_failed=true, backoff_ms=0, sample_interval_ms=200, queue_capacity=None, timeout_ms=None, grace_ms=None, catch_ctrl_c=false))]
+    #[pyo3(signature = (concurrency, max_attempts=1, avoid_failed=true, backoff_ms=0, jitter=0.0, sample_interval_ms=200, queue_capacity=None, timeout_ms=None, grace_ms=None, catch_ctrl_c=false, resources=None, dead_letter=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         concurrency: usize,
         max_attempts: u32,
         avoid_failed: bool,
         backoff_ms: u64,
+        jitter: f64,
         sample_interval_ms: u64,
         queue_capacity: Option<usize>,
         timeout_ms: Option<u64>,
         grace_ms: Option<u64>,
         catch_ctrl_c: bool,
+        resources: Option<HashMap<String, usize>>,
+        dead_letter: Option<Py<PyAny>>,
     ) -> Self {
         Engine {
             concurrency: concurrency.max(1),
             max_attempts,
             avoid_failed,
             backoff_ms,
+            jitter,
             sample_interval_ms,
             queue_capacity,
             timeout_ms,
             grace_ms,
             catch_ctrl_c,
+            resources: resources.unwrap_or_default(),
+            dead_letter,
             registrations: Vec::new(),
             seeds: Vec::new(),
         }
     }
 
-    #[pyo3(signature = (task_cls, process, label=None, concurrency=None, timeout_ms=None))]
+    #[pyo3(signature = (task_cls, process, label=None, concurrency=None, timeout_ms=None, attrs=None, requires=None, retry=None))]
+    #[allow(clippy::too_many_arguments)]
     fn register(
         &mut self,
         py: Python<'_>,
@@ -276,6 +378,9 @@ impl Engine {
         label: Option<String>,
         concurrency: Option<usize>,
         timeout_ms: Option<u64>,
+        attrs: Option<HashMap<String, String>>,
+        requires: Option<Vec<String>>,
+        retry: Option<(u32, bool, u64, f64)>,
     ) -> PyResult<()> {
         let (key, name) = class_key_name(task_cls.bind(py))?;
         self.registrations.push(Registration {
@@ -285,6 +390,9 @@ impl Engine {
             label,
             concurrency,
             timeout_ms,
+            attrs: attrs.into_iter().flatten().collect(),
+            requires: requires.unwrap_or_default(),
+            retry,
         });
         Ok(())
     }
@@ -309,20 +417,25 @@ impl Engine {
         live: bool,
         shutdown: Option<Py<PyShutdown>>,
     ) -> PyResult<Py<PyAny>> {
-        let mut retry = RetryPolicy::new().max_attempts(self.max_attempts);
-        retry = if self.avoid_failed {
-            retry.avoid_failed()
-        } else {
-            retry.any_instance()
-        };
-        if self.backoff_ms > 0 {
-            retry = retry.backoff(Backoff::Fixed(Duration::from_millis(self.backoff_ms)));
-        }
+        let retry = make_retry(
+            self.max_attempts,
+            self.avoid_failed,
+            self.backoff_ms,
+            self.jitter,
+        );
 
         let mut builder = bask::Engine::builder()
             .concurrency(self.concurrency)
             .retry(retry)
             .sample_interval(Duration::from_millis(self.sample_interval_ms));
+        for (name, permits) in &self.resources {
+            builder = builder.resource(name.clone(), *permits);
+        }
+        if let Some(callback) = &self.dead_letter {
+            builder = builder.dead_letter(PyDeadLetter {
+                callback: callback.clone_ref(py),
+            });
+        }
         if let Some(capacity) = self.queue_capacity {
             builder = builder.queue_capacity(capacity);
         }
@@ -356,6 +469,15 @@ impl Engine {
             }
             if let Some(ms) = reg.timeout_ms {
                 cfg = cfg.timeout(Duration::from_millis(ms));
+            }
+            for (key, value) in &reg.attrs {
+                cfg = cfg.attr(key, value);
+            }
+            for resource in &reg.requires {
+                cfg = cfg.requires(resource.clone());
+            }
+            if let Some((max_attempts, avoid_failed, backoff_ms, jitter)) = reg.retry {
+                cfg = cfg.retry(make_retry(max_attempts, avoid_failed, backoff_ms, jitter));
             }
             builder = builder.worker_dyn(reg.key, worker, reg.type_name, cfg);
         }
