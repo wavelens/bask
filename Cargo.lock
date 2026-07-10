@@ -76,6 +76,7 @@ dependencies = [
  "arrow-ipc",
  "arrow-json",
  "arrow-ord",
+ "arrow-pyarrow",
  "arrow-row",
  "arrow-schema",
  "arrow-select",
@@ -228,6 +229,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "arrow-pyarrow"
+version = "59.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf8d967bdece4fa5a0199706730175b3df3448b87e350250a86eb6c22639e445"
+dependencies = [
+ "arrow-array",
+ "arrow-data",
+ "arrow-schema",
+ "pyo3",
+]
+
+[[package]]
 name = "arrow-row"
 version = "59.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -245,6 +258,9 @@ name = "arrow-schema"
 version = "59.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9e4969dc350d571766247143ab36a5187d095d3d3690970408bc630d47c69e5"
+dependencies = [
+ "bitflags",
+]
 
 [[package]]
 name = "arrow-select"
@@ -376,8 +392,10 @@ name = "bask-python"
 version = "0.1.1"
 dependencies = [
  "anyhow",
+ "arrow",
  "async-trait",
  "bask-core",
+ "bask-tasks",
  "pyo3",
  "tokio",
 ]

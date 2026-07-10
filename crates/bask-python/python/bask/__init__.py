@@ -137,6 +137,7 @@ class Engine:
         self._resources = resources
         self._dead_letter = dead_letter
         self._registrations: list[_Registration] = []
+        self._chunkers: list[tuple] = []
         self._routers: dict[type, Any] = {}
         self._dedups: dict[type, set] = {}
         self._seeds: list[Any] = []
@@ -205,6 +206,21 @@ class Engine:
         self._resources[name] = permits
         return self
 
+    def chunker(
+        self,
+        source_cls: type,
+        piece_cls: type,
+        rows: int,
+        *,
+        label: str | None = None,
+        concurrency: int | None = None,
+    ) -> "Engine":
+        """Register the Rust chunker stage. Each `source_cls` instance's `batch` (a pyarrow
+        RecordBatch) is split into pieces of at most `rows` rows, each emitted as
+        `piece_cls(batch)`. See `bask.tasks.Batch` for a ready-made wrapper."""
+        self._chunkers.append((source_cls, piece_cls, rows, label, concurrency))
+        return self
+
     def seed(self, task: Any) -> "Engine":
         self._seeds.append(task)
         return self
@@ -235,6 +251,8 @@ class Engine:
                 reg.requires,
                 reg.retry._tuple() if reg.retry else None,
             )
+        for source_cls, piece_cls, rows, label, concurrency in self._chunkers:
+            engine.chunker(source_cls, piece_cls, rows, label, concurrency)
         for task in self._seeds:
             engine.seed(task)
         raw = engine.run(self._routers, self._dedups, live, shutdown)
