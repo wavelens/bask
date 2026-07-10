@@ -15,6 +15,7 @@ mod context;
 mod dedup;
 mod engine;
 mod error;
+mod interrupt;
 mod metrics;
 mod monitor;
 mod registry;
@@ -32,6 +33,7 @@ pub use context::Context;
 pub use dedup::Dedup;
 pub use engine::{Engine, EngineBuilder};
 pub use error::{Error, Result};
+pub use interrupt::Shutdown;
 pub use metrics::{Snapshot, WorkerStat};
 pub use monitor::{LiveConsole, Monitor};
 pub use report::{RunReport, Stats, TaskFailure};
@@ -43,7 +45,7 @@ pub use worker::{DynWorker, Worker, WorkerCfg};
 pub mod prelude {
     pub use crate::{
         Aggregator, Backoff, Context, Dedup, Engine, InstanceChoice, LiveConsole, Monitor,
-        RetryPolicy, RunReport, Snapshot, Task, Worker, WorkerCfg,
+        RetryPolicy, RunReport, Shutdown, Snapshot, Task, Worker, WorkerCfg,
     };
     pub use anyhow;
     pub use async_trait::async_trait;

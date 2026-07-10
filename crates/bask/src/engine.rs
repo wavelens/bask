@@ -14,11 +14,12 @@ use tokio::sync::Semaphore;
 
 use crate::aggregator::{Aggregator, Aggregators};
 use crate::dedup::{Dedup, Dedups};
+use crate::interrupt::Shutdown;
 use crate::monitor::Monitor;
 use crate::registry::{Group, Instance, Registry};
 use crate::report::RunReport;
 use crate::retry::RetryPolicy;
-use crate::scheduler;
+use crate::scheduler::{self, Interrupt};
 use crate::task::{Envelope, RouteKey, Task};
 use crate::worker::{DynWorker, Holder, Worker, WorkerCfg};
 
@@ -26,6 +27,7 @@ struct InstanceSpec {
     worker: Arc<dyn DynWorker>,
     label: Option<String>,
     concurrency: Option<usize>,
+    timeout: Option<Duration>,
     type_name: &'static str,
 }
 
@@ -39,6 +41,10 @@ pub struct EngineBuilder {
     retry: RetryPolicy,
     concurrency: usize,
     queue_capacity: Option<usize>,
+    timeout: Option<Duration>,
+    shutdown: Option<Shutdown>,
+    grace: Duration,
+    catch_ctrl_c: bool,
     seeds: Vec<Envelope>,
     monitor: Option<Box<dyn Monitor>>,
     sample_interval: Duration,
@@ -51,6 +57,7 @@ pub struct Engine {
     retry: RetryPolicy,
     concurrency: usize,
     queue_capacity: usize,
+    interrupt: Interrupt,
     seeds: Vec<Envelope>,
     monitor: Option<Box<dyn Monitor>>,
     sample_interval: Duration,
@@ -65,6 +72,10 @@ impl Engine {
             retry: RetryPolicy::default(),
             concurrency: default_parallelism(),
             queue_capacity: None,
+            timeout: None,
+            shutdown: None,
+            grace: Duration::from_secs(30),
+            catch_ctrl_c: false,
             seeds: Vec::new(),
             monitor: None,
             sample_interval: Duration::from_millis(200),
@@ -79,6 +90,7 @@ impl Engine {
             self.retry,
             self.concurrency,
             self.queue_capacity,
+            self.interrupt,
             self.seeds,
             self.monitor,
             self.sample_interval,
@@ -100,6 +112,7 @@ impl EngineBuilder {
             worker: Arc::new(Holder(worker)),
             label: cfg.label,
             concurrency: cfg.concurrency,
+            timeout: cfg.timeout,
             type_name: std::any::type_name::<W>(),
         };
         self.specs
@@ -122,6 +135,7 @@ impl EngineBuilder {
             worker,
             label: cfg.label,
             concurrency: cfg.concurrency,
+            timeout: cfg.timeout,
             type_name,
         };
         self.specs.entry(RouteKey::Dyn(key)).or_default().push(spec);
@@ -172,6 +186,31 @@ impl EngineBuilder {
         self
     }
 
+    /// Default per-task timeout applied to every worker without its own
+    /// [`WorkerCfg::timeout`]; on elapse the task is cancelled and retried.
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    /// Register a handle that requests a graceful shutdown when triggered.
+    pub fn shutdown(mut self, shutdown: Shutdown) -> Self {
+        self.shutdown = Some(shutdown);
+        self
+    }
+
+    /// How long in-flight work may finish after a shutdown before it is cancelled.
+    pub fn grace_period(mut self, grace: Duration) -> Self {
+        self.grace = grace;
+        self
+    }
+
+    /// Trigger a graceful shutdown on the first Ctrl-C (SIGINT).
+    pub fn catch_ctrl_c(mut self) -> Self {
+        self.catch_ctrl_c = true;
+        self
+    }
+
     pub fn retry(mut self, retry: RetryPolicy) -> Self {
         self.retry = retry;
         self
@@ -193,6 +232,12 @@ impl EngineBuilder {
         let queue_capacity = self
             .queue_capacity
             .unwrap_or_else(|| concurrency.saturating_mul(16).max(256));
+        let default_timeout = self.timeout;
+        let interrupt = Interrupt {
+            shutdown: self.shutdown.unwrap_or_default(),
+            grace: self.grace,
+            catch_ctrl_c: self.catch_ctrl_c,
+        };
         let mut registry = Registry::default();
         for (key, specs) in self.specs {
             assert!(
@@ -214,6 +259,7 @@ impl EngineBuilder {
                         permits: Arc::new(Semaphore::new(cap)),
                         capacity: cap,
                         active: AtomicUsize::new(0),
+                        timeout: s.timeout.or(default_timeout),
                     }
                 })
                 .collect();
@@ -242,6 +288,7 @@ impl EngineBuilder {
             retry: self.retry,
             concurrency,
             queue_capacity,
+            interrupt,
             seeds: self.seeds,
             monitor: self.monitor,
             sample_interval: self.sample_interval,

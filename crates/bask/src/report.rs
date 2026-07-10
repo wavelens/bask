@@ -49,6 +49,10 @@ pub struct RunReport {
     pub(crate) unique: HashMap<TypeId, usize>,
     pub stats: Stats,
     pub failures: Vec<TaskFailure>,
+    /// Whether a shutdown was requested before the run drained on its own.
+    pub interrupted: bool,
+    /// Tasks that existed but were never processed (abandoned queue plus cancelled work).
+    pub unfinished: usize,
 }
 
 impl RunReport {

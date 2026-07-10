@@ -5,6 +5,7 @@
  */
 
 use std::any::Any;
+use std::time::Duration;
 
 use async_trait::async_trait;
 
@@ -67,11 +68,13 @@ impl<W: Worker> DynWorker for Holder<W> {
     }
 }
 
-/// Per-instance registration options: a display label and a concurrency cap.
+/// Per-instance registration options: a display label, a concurrency cap, and a
+/// per-task timeout after which `process` is cancelled and routed through retry.
 #[derive(Default)]
 pub struct WorkerCfg {
     pub(crate) label: Option<String>,
     pub(crate) concurrency: Option<usize>,
+    pub(crate) timeout: Option<Duration>,
 }
 
 impl WorkerCfg {
@@ -84,6 +87,10 @@ impl WorkerCfg {
     }
     pub fn concurrency(mut self, n: usize) -> Self {
         self.concurrency = Some(n);
+        self
+    }
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
         self
     }
 }

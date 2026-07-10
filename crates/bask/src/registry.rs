@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::SeqCst};
+use std::time::Duration;
 
 use tokio::sync::Semaphore;
 
@@ -21,6 +22,7 @@ pub(crate) struct Instance {
     pub permits: Arc<Semaphore>,
     pub capacity: usize,
     pub active: AtomicUsize,
+    pub timeout: Option<Duration>,
 }
 
 /// All instances registered for a single task type, plus live counters for observation.

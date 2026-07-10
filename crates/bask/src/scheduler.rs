@@ -13,6 +13,7 @@ use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc};
 use crate::aggregator::Aggregators;
 use crate::context::Context;
 use crate::dedup::Dedups;
+use crate::interrupt::{Cancel, Shutdown};
 use crate::metrics::{Snapshot, WorkerStat};
 use crate::monitor::Monitor;
 use crate::registry::Registry;
@@ -220,6 +221,19 @@ impl InFlight {
     }
 }
 
+/// Graceful-interruption configuration handed to a run.
+pub(crate) struct Interrupt {
+    pub shutdown: Shutdown,
+    pub grace: Duration,
+    pub catch_ctrl_c: bool,
+}
+
+/// How a single `process` invocation ended.
+enum Outcome {
+    Done(anyhow::Result<()>),
+    Cancelled,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run(
     registry: Arc<Registry>,
@@ -228,6 +242,7 @@ pub(crate) async fn run(
     retry: RetryPolicy,
     concurrency: usize,
     queue_capacity: usize,
+    interrupt: Interrupt,
     seeds: Vec<Envelope>,
     mut monitor: Option<Box<dyn Monitor>>,
     sample_interval: Duration,
@@ -244,12 +259,28 @@ pub(crate) async fn run(
     let stats = Arc::new(AtomicStats::default());
     let failures = Arc::new(Mutex::new(Vec::<TaskFailure>::new()));
     let depth = Arc::new(AtomicUsize::new(0));
+    let unfinished = Arc::new(AtomicUsize::new(0));
+    let cancel = Cancel::default();
     let (tx, mut rx) = mpsc::channel::<Envelope>(queue_capacity.max(1));
     let queue = Queue {
         tx,
         registry: registry.clone(),
         depth: depth.clone(),
     };
+
+    let Interrupt {
+        shutdown,
+        grace,
+        catch_ctrl_c,
+    } = interrupt;
+    let ctrl_c = catch_ctrl_c.then(|| {
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                shutdown.trigger();
+            }
+        })
+    });
 
     // Count seeds up front so the loop cannot terminate before they land, then feed
     // them through the bounded queue concurrently with draining (seeds may exceed it).
@@ -276,9 +307,16 @@ pub(crate) async fn run(
     let mut ticker = tokio::time::interval(sample_interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+    // Phase 1: dispatch until the run drains on its own or a shutdown is requested.
+    let shutdown_fut = shutdown.triggered();
+    tokio::pin!(shutdown_fut);
     let mut seq: usize = 0;
     while !in_flight.is_zero() {
+        if shutdown.is_triggered() {
+            break;
+        }
         tokio::select! {
+            _ = &mut shutdown_fut => break,
             maybe = rx.recv() => {
                 let Some(env) = maybe else { break };
                 queue.note_dequeued(env.key);
@@ -298,6 +336,8 @@ pub(crate) async fn run(
                     retry: retry.clone(),
                     stats: stats.clone(),
                     failures: failures.clone(),
+                    cancel: cancel.clone(),
+                    unfinished: unfinished.clone(),
                 });
             }
             _ = in_flight.wait_idle() => {}
@@ -307,6 +347,39 @@ pub(crate) async fn run(
                 }
             }
         }
+    }
+
+    // Phase 2: no new work is dispatched; let in-flight tasks finish within the grace
+    // period, cancel whatever remains, and account for every abandoned task.
+    let interrupted = shutdown.is_triggered();
+    if interrupted {
+        let grace_timer = tokio::time::sleep(grace);
+        tokio::pin!(grace_timer);
+        let mut cancelled = false;
+        while !in_flight.is_zero() {
+            tokio::select! {
+                _ = &mut grace_timer, if !cancelled => {
+                    cancel.cancel();
+                    cancelled = true;
+                }
+                maybe = rx.recv() => {
+                    if let Some(env) = maybe {
+                        queue.note_dequeued(env.key);
+                        unfinished.fetch_add(1, SeqCst);
+                        in_flight.dec();
+                    }
+                }
+                _ = in_flight.wait_idle() => {}
+                _ = ticker.tick() => {
+                    if let Some(m) = monitor.as_mut() {
+                        m.sample(&snapshot(&registry, in_flight.count(), depth.load(SeqCst), &stats));
+                    }
+                }
+            }
+        }
+    }
+    if let Some(handle) = ctrl_c {
+        handle.abort();
     }
 
     for group in registry.groups.values() {
@@ -323,6 +396,8 @@ pub(crate) async fn run(
         unique,
         stats: stats.snapshot(),
         failures,
+        interrupted,
+        unfinished: unfinished.load(SeqCst),
     };
 
     if let Some(m) = monitor.as_mut() {
@@ -375,6 +450,8 @@ struct Dispatch {
     retry: RetryPolicy,
     stats: Arc<AtomicStats>,
     failures: Arc<Mutex<Vec<TaskFailure>>>,
+    cancel: Cancel,
+    unfinished: Arc<AtomicUsize>,
 }
 
 fn dispatch(d: Dispatch) {
@@ -392,6 +469,8 @@ fn dispatch(d: Dispatch) {
             retry,
             stats,
             failures,
+            cancel,
+            unfinished,
         } = d;
 
         let Some(group) = registry.groups.get(&env.key) else {
@@ -441,12 +520,34 @@ fn dispatch(d: Dispatch) {
             dedups: dedups.clone(),
             shard,
             run: run.clone(),
+            cancel: cancel.clone(),
         };
-        let res = inst.worker.process(env.payload.as_ref(), &ctx).await;
+        let outcome = match inst.timeout {
+            Some(dur) => tokio::select! {
+                biased;
+                _ = cancel.cancelled() => Outcome::Cancelled,
+                r = tokio::time::timeout(dur, inst.worker.process(env.payload.as_ref(), &ctx)) => {
+                    Outcome::Done(r.unwrap_or_else(|_| Err(anyhow::anyhow!("timed out after {dur:?}"))))
+                }
+            },
+            None => tokio::select! {
+                biased;
+                _ = cancel.cancelled() => Outcome::Cancelled,
+                res = inst.worker.process(env.payload.as_ref(), &ctx) => Outcome::Done(res),
+            },
+        };
         inst.active.fetch_sub(1, SeqCst);
         drop(ctx);
         drop(run); // release concurrency permits before any backpressured re-enqueue
 
+        let res = match outcome {
+            Outcome::Cancelled => {
+                unfinished.fetch_add(1, SeqCst);
+                in_flight.dec();
+                return;
+            }
+            Outcome::Done(res) => res,
+        };
         match res {
             Ok(()) => {
                 stats.processed.fetch_add(1, SeqCst);
@@ -467,9 +568,19 @@ fn dispatch(d: Dispatch) {
                         }
                         Some(delay) => {
                             let queue = queue.clone();
+                            let cancel = cancel.clone();
+                            let in_flight = in_flight.clone();
+                            let unfinished = unfinished.clone();
                             tokio::spawn(async move {
-                                tokio::time::sleep(delay).await;
-                                let _ = queue.send(env).await;
+                                tokio::select! {
+                                    _ = tokio::time::sleep(delay) => {
+                                        let _ = queue.send(env).await;
+                                    }
+                                    _ = cancel.cancelled() => {
+                                        unfinished.fetch_add(1, SeqCst);
+                                        in_flight.dec();
+                                    }
+                                }
                             });
                         }
                     }

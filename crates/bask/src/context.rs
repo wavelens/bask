@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use crate::aggregator::{Aggregator, Aggregators};
 use crate::dedup::{Dedup, Dedups};
+use crate::interrupt::Cancel;
 use crate::scheduler::{InFlight, Queue, RunSlot, Sent};
 use crate::task::{Envelope, Task};
 
@@ -19,6 +20,7 @@ pub struct Context {
     pub(crate) dedups: Arc<Dedups>,
     pub(crate) shard: usize,
     pub(crate) run: Arc<RunSlot>,
+    pub(crate) cancel: Cancel,
 }
 
 impl Context {
@@ -57,5 +59,16 @@ impl Context {
     /// after. Gate emission with it to admit each distinct task once.
     pub fn first_seen<D: Dedup>(&self, key: D::Key) -> bool {
         self.dedups.first_seen::<D>(key)
+    }
+
+    /// Whether a shutdown has escalated to cancellation; long-running workers should
+    /// poll this (or await [`cancelled`](Context::cancelled)) and return early.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+
+    /// Resolves once the run is cancelled; select against it to abort a long operation.
+    pub async fn cancelled(&self) {
+        self.cancel.cancelled().await;
     }
 }
