@@ -16,7 +16,10 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
-use bask::{Backoff, Context, DynWorker, Emitter, LiveConsole, RetryPolicy, WorkerCfg};
+use bask::{
+    Backoff, Cancellation, Context, DynWorker, Emitter, LiveConsole, RetryPolicy, Shutdown,
+    WorkerCfg,
+};
 
 /// Interns a Python class name to a `'static` string, keyed by the class pointer.
 /// The set of task classes is small and lives for the process, so leaking once is fine.
@@ -64,6 +67,7 @@ impl DynWorker for PyWorker {
             )
         });
         let emitter = ctx.emitter();
+        let cancellation = ctx.cancellation();
 
         // Run the (blocking) Python call off the async worker threads so the router
         // is never starved; the GIL still serializes Python execution.
@@ -73,6 +77,7 @@ impl DynWorker for PyWorker {
                     py,
                     Ctx {
                         emitter,
+                        cancellation,
                         aggregators,
                         dedups,
                     },
@@ -99,6 +104,7 @@ impl DynWorker for PyWorker {
 #[pyclass]
 struct Ctx {
     emitter: Emitter,
+    cancellation: Cancellation,
     aggregators: Py<PyAny>,
     dedups: Py<PyAny>,
 }
@@ -109,8 +115,11 @@ impl Ctx {
     fn emit(&self, py: Python<'_>, task: Py<PyAny>) -> PyResult<()> {
         let ty = task.bind(py).get_type();
         let (key, name) = class_key_name(ty.as_any())?;
-        self.emitter
-            .emit_dyn(key, intern(key, &name), Box::new(task))
+        let type_name = intern(key, &name);
+        // Release the GIL while emitting: a full queue parks this worker in `emit_dyn`,
+        // and the dispatcher needs the GIL to run the Python workers that drain it, so
+        // holding it here would deadlock under backpressure.
+        py.detach(|| self.emitter.emit_dyn(key, type_name, Box::new(task)))
             .map_err(|_| PyRuntimeError::new_err("engine stopped"))?;
         Ok(())
     }
@@ -135,6 +144,12 @@ impl Ctx {
         seen.call_method1("add", (key,))?;
         Ok(true)
     }
+
+    /// Whether a graceful shutdown has escalated to cancellation; long-running workers
+    /// should poll this and return early.
+    fn is_cancelled(&self) -> bool {
+        self.cancellation.is_cancelled()
+    }
 }
 
 struct Registration {
@@ -143,12 +158,38 @@ struct Registration {
     process: Py<PyAny>,
     label: Option<String>,
     concurrency: Option<usize>,
+    timeout_ms: Option<u64>,
 }
 
 struct Seed {
     key: u64,
     type_name: &'static str,
     payload: Py<PyAny>,
+}
+
+/// A handle to request a graceful shutdown; pass to `Engine.run(shutdown=...)` and call
+/// `trigger()` from another thread or a signal handler.
+#[pyclass(name = "Shutdown")]
+struct PyShutdown {
+    inner: Shutdown,
+}
+
+#[pymethods]
+impl PyShutdown {
+    #[new]
+    fn new() -> Self {
+        PyShutdown {
+            inner: Shutdown::new(),
+        }
+    }
+
+    fn trigger(&self) {
+        self.inner.trigger();
+    }
+
+    fn is_triggered(&self) -> bool {
+        self.inner.is_triggered()
+    }
 }
 
 /// Accumulates registrations, then runs the Rust engine with Python workers.
@@ -159,6 +200,10 @@ struct Engine {
     avoid_failed: bool,
     backoff_ms: u64,
     sample_interval_ms: u64,
+    queue_capacity: Option<usize>,
+    timeout_ms: Option<u64>,
+    grace_ms: Option<u64>,
+    catch_ctrl_c: bool,
     registrations: Vec<Registration>,
     seeds: Vec<Seed>,
 }
@@ -166,13 +211,18 @@ struct Engine {
 #[pymethods]
 impl Engine {
     #[new]
-    #[pyo3(signature = (concurrency, max_attempts=1, avoid_failed=true, backoff_ms=0, sample_interval_ms=200))]
+    #[pyo3(signature = (concurrency, max_attempts=1, avoid_failed=true, backoff_ms=0, sample_interval_ms=200, queue_capacity=None, timeout_ms=None, grace_ms=None, catch_ctrl_c=false))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         concurrency: usize,
         max_attempts: u32,
         avoid_failed: bool,
         backoff_ms: u64,
         sample_interval_ms: u64,
+        queue_capacity: Option<usize>,
+        timeout_ms: Option<u64>,
+        grace_ms: Option<u64>,
+        catch_ctrl_c: bool,
     ) -> Self {
         Engine {
             concurrency: concurrency.max(1),
@@ -180,12 +230,16 @@ impl Engine {
             avoid_failed,
             backoff_ms,
             sample_interval_ms,
+            queue_capacity,
+            timeout_ms,
+            grace_ms,
+            catch_ctrl_c,
             registrations: Vec::new(),
             seeds: Vec::new(),
         }
     }
 
-    #[pyo3(signature = (task_cls, process, label=None, concurrency=None))]
+    #[pyo3(signature = (task_cls, process, label=None, concurrency=None, timeout_ms=None))]
     fn register(
         &mut self,
         py: Python<'_>,
@@ -193,6 +247,7 @@ impl Engine {
         process: Py<PyAny>,
         label: Option<String>,
         concurrency: Option<usize>,
+        timeout_ms: Option<u64>,
     ) -> PyResult<()> {
         let (key, name) = class_key_name(task_cls.bind(py))?;
         self.registrations.push(Registration {
@@ -201,6 +256,7 @@ impl Engine {
             process,
             label,
             concurrency,
+            timeout_ms,
         });
         Ok(())
     }
@@ -216,13 +272,14 @@ impl Engine {
         Ok(())
     }
 
-    #[pyo3(signature = (aggregators, dedups, live=false))]
+    #[pyo3(signature = (aggregators, dedups, live=false, shutdown=None))]
     fn run(
         &self,
         py: Python<'_>,
         aggregators: Py<PyAny>,
         dedups: Py<PyAny>,
         live: bool,
+        shutdown: Option<Py<PyShutdown>>,
     ) -> PyResult<Py<PyAny>> {
         let mut retry = RetryPolicy::new().max_attempts(self.max_attempts);
         retry = if self.avoid_failed {
@@ -238,6 +295,21 @@ impl Engine {
             .concurrency(self.concurrency)
             .retry(retry)
             .sample_interval(Duration::from_millis(self.sample_interval_ms));
+        if let Some(capacity) = self.queue_capacity {
+            builder = builder.queue_capacity(capacity);
+        }
+        if let Some(ms) = self.timeout_ms {
+            builder = builder.timeout(Duration::from_millis(ms));
+        }
+        if let Some(ms) = self.grace_ms {
+            builder = builder.grace_period(Duration::from_millis(ms));
+        }
+        if self.catch_ctrl_c {
+            builder = builder.catch_ctrl_c();
+        }
+        if let Some(handle) = &shutdown {
+            builder = builder.shutdown(handle.borrow(py).inner.clone());
+        }
         if live {
             builder = builder.monitor(LiveConsole::new());
         }
@@ -254,6 +326,9 @@ impl Engine {
             if let Some(c) = reg.concurrency {
                 cfg = cfg.concurrency(c);
             }
+            if let Some(ms) = reg.timeout_ms {
+                cfg = cfg.timeout(Duration::from_millis(ms));
+            }
             builder = builder.worker_dyn(reg.key, worker, reg.type_name, cfg);
         }
         for seed in &self.seeds {
@@ -266,14 +341,23 @@ impl Engine {
             .enable_all()
             .build()
             .map_err(|e| PyRuntimeError::new_err(format!("tokio runtime: {e}")))?;
+        // Drop the runtime with the GIL released. A graceful shutdown can leave cancelled
+        // `spawn_blocking` workers running; the runtime's drop waits for them and they need
+        // the GIL to finish, so holding it here would deadlock.
         let report = py
-            .detach(|| runtime.block_on(engine.run()))
+            .detach(|| {
+                let report = runtime.block_on(engine.run());
+                drop(runtime);
+                report
+            })
             .map_err(|e| PyRuntimeError::new_err(format!("{e}")))?;
 
         let dict = PyDict::new(py);
         dict.set_item("processed", report.stats.processed)?;
         dict.set_item("retried", report.stats.retried)?;
         dict.set_item("failed", report.stats.failed)?;
+        dict.set_item("interrupted", report.interrupted)?;
+        dict.set_item("unfinished", report.unfinished)?;
         let failures = PyList::empty(py);
         for failure in &report.failures {
             let item = PyDict::new(py);
@@ -291,5 +375,6 @@ impl Engine {
 #[pymodule]
 fn _bask(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Engine>()?;
+    m.add_class::<PyShutdown>()?;
     Ok(())
 }

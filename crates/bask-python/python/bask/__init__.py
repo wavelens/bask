@@ -13,8 +13,9 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from . import _bask
+from ._bask import Shutdown
 
-__all__ = ["Engine", "Retry", "Report"]
+__all__ = ["Engine", "Retry", "Report", "Shutdown"]
 
 
 @dataclass
@@ -34,6 +35,8 @@ class Report:
         self.retried: int = raw["retried"]
         self.failed: int = raw["failed"]
         self.failures: list[dict] = raw["failures"]
+        self.interrupted: bool = raw["interrupted"]
+        self.unfinished: int = raw["unfinished"]
         self._outputs = outputs
         self._unique = unique
 
@@ -47,7 +50,8 @@ class Report:
     def __repr__(self) -> str:
         return (
             f"Report(processed={self.processed}, retried={self.retried}, "
-            f"failed={self.failed})"
+            f"failed={self.failed}, interrupted={self.interrupted}, "
+            f"unfinished={self.unfinished})"
         )
 
 
@@ -57,6 +61,7 @@ class _Registration:
     process: Callable
     label: str | None
     concurrency: int | None
+    timeout_ms: int | None
 
 
 class Engine:
@@ -67,21 +72,36 @@ class Engine:
         concurrency: int | None = None,
         retry: Retry | None = None,
         sample_interval_ms: int = 200,
+        queue_capacity: int | None = None,
+        timeout_ms: int | None = None,
+        grace_ms: int | None = None,
+        catch_ctrl_c: bool = False,
     ):
         self._concurrency = concurrency or (os.cpu_count() or 4)
         self._retry = retry or Retry()
         self._sample_interval_ms = sample_interval_ms
+        self._queue_capacity = queue_capacity
+        self._timeout_ms = timeout_ms
+        self._grace_ms = grace_ms
+        self._catch_ctrl_c = catch_ctrl_c
         self._registrations: list[_Registration] = []
         self._aggregators: dict[type, Any] = {}
         self._dedups: dict[type, set] = {}
         self._seeds: list[Any] = []
 
-    def worker(self, task_cls: type, *, label: str | None = None, concurrency: int | None = None):
+    def worker(
+        self,
+        task_cls: type,
+        *,
+        label: str | None = None,
+        concurrency: int | None = None,
+        timeout_ms: int | None = None,
+    ):
         """Decorator: register a function or class as a worker for `task_cls`."""
 
         def decorate(target):
             self._registrations.append(
-                _Registration(task_cls, _as_process(target), label, concurrency)
+                _Registration(task_cls, _as_process(target), label, concurrency, timeout_ms)
             )
             return target
 
@@ -94,10 +114,11 @@ class Engine:
         *,
         label: str | None = None,
         concurrency: int | None = None,
+        timeout_ms: int | None = None,
     ):
         """Register a pre-built worker instance (for groups with distinct params)."""
         self._registrations.append(
-            _Registration(task_cls, _as_process(instance), label, concurrency)
+            _Registration(task_cls, _as_process(instance), label, concurrency, timeout_ms)
         )
         return instance
 
@@ -116,19 +137,23 @@ class Engine:
         self._seeds.append(task)
         return self
 
-    def run(self, live: bool = False) -> Report:
+    def run(self, live: bool = False, shutdown: Shutdown | None = None) -> Report:
         engine = _bask.Engine(
             self._concurrency,
             self._retry.max_attempts,
             self._retry.avoid_failed,
             self._retry.backoff_ms,
             self._sample_interval_ms,
+            self._queue_capacity,
+            self._timeout_ms,
+            self._grace_ms,
+            self._catch_ctrl_c,
         )
         for reg in self._registrations:
-            engine.register(reg.task_cls, reg.process, reg.label, reg.concurrency)
+            engine.register(reg.task_cls, reg.process, reg.label, reg.concurrency, reg.timeout_ms)
         for task in self._seeds:
             engine.seed(task)
-        raw = engine.run(self._aggregators, self._dedups, live)
+        raw = engine.run(self._aggregators, self._dedups, live, shutdown)
         outputs = {cls: inst.finalize() for cls, inst in self._aggregators.items()}
         unique = {marker: len(seen) for marker, seen in self._dedups.items()}
         return Report(raw, outputs, unique)
