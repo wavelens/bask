@@ -25,6 +25,18 @@ pub struct Piece(pub RecordBatch);
 /// smaller). Concatenated into a single batch when the shard's batches share a schema.
 pub struct Batch(pub RecordBatch);
 
+/// Splits `batch` into consecutive zero-copy slices of at most `rows` rows each. The
+/// building block behind [`Chunker`]; front-ends (e.g. the Python bindings) call it to
+/// reuse the stage without the worker wrapper.
+pub fn chunk(batch: &RecordBatch, rows: usize) -> Vec<RecordBatch> {
+    let rows = rows.max(1);
+    let total = batch.num_rows();
+    (0..total)
+        .step_by(rows)
+        .map(|offset| batch.slice(offset, rows.min(total - offset)))
+        .collect()
+}
+
 /// Splits each [`Whole`] into zero-copy [`Piece`]s of at most `ROWS` rows.
 pub struct Chunker<const ROWS: usize>;
 
@@ -32,13 +44,8 @@ pub struct Chunker<const ROWS: usize>;
 impl<const ROWS: usize> Worker for Chunker<ROWS> {
     type Task = Whole;
     async fn process(&self, whole: &Whole, ctx: &Context) -> anyhow::Result<()> {
-        let rows = ROWS.max(1);
-        let total = whole.0.num_rows();
-        let mut offset = 0;
-        while offset < total {
-            let len = rows.min(total - offset);
-            ctx.emit(Piece(whole.0.slice(offset, len))).await?;
-            offset += len;
+        for piece in chunk(&whole.0, ROWS) {
+            ctx.emit(Piece(piece)).await?;
         }
         Ok(())
     }

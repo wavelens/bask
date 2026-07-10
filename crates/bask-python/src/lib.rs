@@ -16,6 +16,8 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
+use arrow::pyarrow::{FromPyArrow, ToPyArrow};
+use arrow::record_batch::RecordBatch;
 use bask_core::{
     Backoff, Cancellation, Context, DeadLetter, DeadLetterSink, DynWorker, Emitter, LiveConsole,
     RetryExt, RetryOn, RetryPolicy, Shutdown, WorkerCfg,
@@ -189,6 +191,63 @@ impl DynWorker for PyWorker {
     }
 }
 
+/// Runs the Rust `bask_tasks::chunk` stage over pyarrow data: it reads the `batch`
+/// attribute (a pyarrow RecordBatch) off each source task, splits it into fixed-row
+/// pieces in Rust, and emits each piece as `piece_cls(pyarrow_batch)`.
+struct ChunkerBridge {
+    rows: usize,
+    piece_key: u64,
+    piece_type: &'static str,
+    piece_cls: Py<PyAny>,
+}
+
+#[async_trait]
+impl DynWorker for ChunkerBridge {
+    async fn process(
+        &self,
+        payload: &(dyn Any + Send + Sync),
+        ctx: &Context,
+    ) -> anyhow::Result<()> {
+        let (source, piece_cls) = Python::attach(|py| {
+            (
+                payload
+                    .downcast_ref::<Py<PyAny>>()
+                    .expect("python payload")
+                    .clone_ref(py),
+                self.piece_cls.clone_ref(py),
+            )
+        });
+        let emitter = ctx.emitter();
+        let (rows, piece_key, piece_type) = (self.rows, self.piece_key, self.piece_type);
+
+        // Convert and slice off the async threads; the GIL still guards each conversion,
+        // and emit releases it so a full queue cannot deadlock the dispatcher.
+        let outcome = tokio::task::spawn_blocking(move || -> Result<(), String> {
+            let batch = Python::attach(|py| {
+                RecordBatch::from_pyarrow_bound(&source.bind(py).getattr("batch")?)
+            })
+            .map_err(|e: PyErr| e.to_string())?;
+
+            for piece in bask_tasks::chunk(&batch, rows) {
+                Python::attach(|py| -> PyResult<()> {
+                    let obj = piece_cls.bind(py).call1((piece.to_pyarrow(py)?,))?.unbind();
+                    py.detach(|| emitter.emit_dyn(piece_key, piece_type, Box::new(obj)))
+                        .map_err(|_| PyRuntimeError::new_err("engine stopped"))
+                })
+                .map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        })
+        .await;
+
+        match outcome {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(message)) => Err(anyhow::anyhow!(message)),
+            Err(join) => Err(anyhow::anyhow!("chunker thread panicked: {join}")),
+        }
+    }
+}
+
 /// Handed to each Python worker as `ctx`.
 #[pyclass]
 struct Ctx {
@@ -287,6 +346,18 @@ struct Seed {
     payload: Py<PyAny>,
 }
 
+/// A registered `Chunker` stage bridging pyarrow data through the Rust splitter.
+struct ChunkerReg {
+    source_key: u64,
+    source_type: &'static str,
+    piece_key: u64,
+    piece_type: &'static str,
+    piece_cls: Py<PyAny>,
+    rows: usize,
+    label: Option<String>,
+    concurrency: Option<usize>,
+}
+
 /// A handle to request a graceful shutdown; pass to `Engine.run(shutdown=...)` and call
 /// `trigger()` from another thread or a signal handler.
 #[pyclass(name = "Shutdown")]
@@ -328,6 +399,7 @@ struct Engine {
     resources: HashMap<String, usize>,
     dead_letter: Option<Py<PyAny>>,
     registrations: Vec<Registration>,
+    chunkers: Vec<ChunkerReg>,
     seeds: Vec<Seed>,
 }
 
@@ -364,8 +436,37 @@ impl Engine {
             resources: resources.unwrap_or_default(),
             dead_letter,
             registrations: Vec::new(),
+            chunkers: Vec::new(),
             seeds: Vec::new(),
         }
+    }
+
+    /// Register the Rust `bask_tasks::Chunker` stage: each `source_cls` instance's `batch`
+    /// (a pyarrow RecordBatch) is split into pieces of at most `rows` rows, and each piece
+    /// is emitted as `piece_cls(pyarrow_batch)`.
+    #[pyo3(signature = (source_cls, piece_cls, rows, label=None, concurrency=None))]
+    fn chunker(
+        &mut self,
+        py: Python<'_>,
+        source_cls: Py<PyAny>,
+        piece_cls: Py<PyAny>,
+        rows: usize,
+        label: Option<String>,
+        concurrency: Option<usize>,
+    ) -> PyResult<()> {
+        let (source_key, source_name) = class_key_name(source_cls.bind(py))?;
+        let (piece_key, piece_name) = class_key_name(piece_cls.bind(py))?;
+        self.chunkers.push(ChunkerReg {
+            source_key,
+            source_type: intern(source_key, &source_name),
+            piece_key,
+            piece_type: intern(piece_key, &piece_name),
+            piece_cls,
+            rows: rows.max(1),
+            label,
+            concurrency,
+        });
+        Ok(())
     }
 
     #[pyo3(signature = (task_cls, process, label=None, concurrency=None, timeout_ms=None, attrs=None, requires=None, retry=None))]
@@ -480,6 +581,22 @@ impl Engine {
                 cfg = cfg.retry(make_retry(max_attempts, avoid_failed, backoff_ms, jitter));
             }
             builder = builder.worker_dyn(reg.key, worker, reg.type_name, cfg);
+        }
+        for reg in &self.chunkers {
+            let bridge: Arc<dyn DynWorker> = Arc::new(ChunkerBridge {
+                rows: reg.rows,
+                piece_key: reg.piece_key,
+                piece_type: reg.piece_type,
+                piece_cls: reg.piece_cls.clone_ref(py),
+            });
+            let mut cfg = WorkerCfg::new();
+            if let Some(label) = &reg.label {
+                cfg = cfg.label(label.clone());
+            }
+            if let Some(c) = reg.concurrency {
+                cfg = cfg.concurrency(c);
+            }
+            builder = builder.worker_dyn(reg.source_key, bridge, reg.source_type, cfg);
         }
         for seed in &self.seeds {
             let payload = Box::new(seed.payload.clone_ref(py));

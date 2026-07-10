@@ -204,6 +204,28 @@ Engine::builder()
     .await?;
 ```
 
+From Python the same Rust splitter runs over pyarrow batches; subclass `bask.tasks.Batch`
+for the routing types and wire it with `engine.chunker`:
+
+```python
+import pyarrow as pa
+from bask import Engine
+from bask.tasks import Batch
+
+class Whole(Batch): pass
+class Piece(Batch): pass
+
+engine = Engine()
+engine.chunker(Whole, Piece, rows=8192)   # Rust bask_tasks::chunk over pyarrow data
+
+@engine.worker(Piece)
+def handle(piece, ctx):
+    ...  # piece.batch is a pyarrow RecordBatch of at most 8192 rows
+
+engine.seed(Whole(pa.record_batch({"n": list(range(1_000_000))})))
+engine.run()
+```
+
 ## Crates
 
 You depend only on `bask`; it re-exports the engine at the crate root and the rest behind
