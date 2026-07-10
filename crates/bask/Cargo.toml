@@ -11,18 +11,32 @@ keywords = ["pipeline", "dataflow", "workers", "streaming", "async"]
 categories = ["asynchronous", "concurrency"]
 
 [dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "fs"] }
 async-trait = "0.1"
 anyhow = "1"
 thiserror = "2"
-arrow = { version = "59", optional = true }
+bytes = { version = "1", optional = true }
+futures = { version = "0.3", optional = true }
+arrow = { version = "59", features = ["csv", "json", "ipc"], optional = true }
 parquet = { version = "59", features = ["arrow"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
+object_store = { version = "0.11", features = ["aws"], optional = true }
+url = { version = "2", optional = true }
+tokio-postgres = { version = "0.7", optional = true }
 
 [features]
-formats = ["dep:arrow", "dep:parquet"]
+io = ["dep:bytes"]
+formats = ["io", "dep:arrow", "dep:parquet"]
+download = ["io", "dep:reqwest"]
+object-store = ["io", "dep:object_store", "dep:url", "dep:futures"]
+postgres = ["formats", "dep:tokio-postgres", "dep:futures"]
 
 [[example]]
 name = "streaming"
+required-features = ["formats"]
+
+[[example]]
+name = "io_convert"
 required-features = ["formats"]
 
 [package.metadata.docs.rs]

@@ -382,9 +382,19 @@ pub(crate) async fn run(
         handle.abort();
     }
 
+    // Drain hook: sinks flush and finalize here, so a finalize failure surfaces as a
+    // terminal task failure rather than silent data loss.
     for group in registry.groups.values() {
         for inst in &group.instances {
-            let _ = inst.worker.on_stop().await;
+            if let Err(err) = inst.worker.on_stop().await {
+                stats.failed.fetch_add(1, SeqCst);
+                failures.lock().unwrap().push(TaskFailure {
+                    task_type: group.worker_type,
+                    instance: inst.label.clone(),
+                    attempts: 1,
+                    error: format!("{err:#}"),
+                });
+            }
         }
     }
 
