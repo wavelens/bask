@@ -1,44 +1,51 @@
 # SPDX-FileCopyrightText: 2026 Wavelens GmbH <info@wavelens.io>
 #
 # SPDX-License-Identifier: MIT OR Apache-2.0
-"""Router as a routing/filtering stage: a stream of numbers is classified so evens are
-routed on as `Even` tasks and odds are filtered out, then a second router sums the evens.
+"""Router as a batcher: a stream of readings is folded into fixed-size batches, each
+full batch is emitted downstream, and the trailing partial batch flushes at end-of-run.
+A second router reduces the per-batch sums into a grand total.
 
-A Python router implements route(self, value, out): it folds `value` into its own state
-and may `out.emit(task)` to route, filter (emit nothing), or fan out.
+A Python router implements route(self, value, out) and, for batching, flush(self, out):
+it folds state and may out.emit(task) to route, filter, or batch.
 """
 from bask import Engine
 
 
-class Number:
+class Reading:
     def __init__(self, n):
         self.n = n
 
 
-class Even:
-    def __init__(self, n):
-        self.n = n
+class Batch:
+    def __init__(self, values):
+        self.values = values
 
 
-engine = Engine()
+engine = Engine(concurrency=1)
 
 
 @engine.router
-class Classify:
+class Batcher:
     def __init__(self):
-        self.seen = 0
+        self.buf = []
 
     def route(self, n, out):
-        self.seen += 1
-        if n % 2 == 0:
-            out.emit(Even(n))  # route evens on, filter odds
+        self.buf.append(n)
+        if len(self.buf) >= 4:
+            out.emit(Batch(self.buf))
+            self.buf = []
+
+    def flush(self, out):
+        if self.buf:
+            out.emit(Batch(self.buf))
+            self.buf = []
 
     def finalize(self):
-        return self.seen
+        return None
 
 
 @engine.router
-class SumEven:
+class Total:
     def __init__(self):
         self.total = 0
 
@@ -49,20 +56,21 @@ class SumEven:
         return self.total
 
 
-@engine.worker(Number)
-def feed(number, ctx):
-    ctx.route(Classify, number.n)
+@engine.worker(Reading)
+def ingest(reading, ctx):
+    ctx.route(Batcher, reading.n)
 
 
-@engine.worker(Even)
-def collect(even, ctx):
-    ctx.route(SumEven, even.n)
+@engine.worker(Batch)
+def process(batch, ctx):
+    total = sum(batch.values)
+    print(f"batch of {len(batch.values)} sums to {total}")
+    ctx.route(Total, total)
 
 
-for n in range(10):
-    engine.seed(Number(n))
+for i in range(1, 11):
+    engine.seed(Reading(i))
 report = engine.run()
 
-print(f"classified {report.output(Classify)} numbers")
-print(f"sum of evens = {report.output(SumEven)}")
+print("grand total =", report.output(Total))
 print("stats:", report)
