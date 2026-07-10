@@ -35,7 +35,7 @@ def crawler(page, ctx):
 
 def renderer(render, ctx):
     time.sleep(0.05)  # simulate rendering
-    ctx.aggregate(Rendered, 1)
+    ctx.route(Rendered, 1)
 
 
 engine.register(Page, crawler, label="crawler-1", concurrency=2)
@@ -44,12 +44,12 @@ engine.register(Render, renderer, label="renderer-1", concurrency=2)
 engine.register(Render, renderer, label="renderer-2", concurrency=2)
 
 
-@engine.aggregator
+@engine.router
 class Rendered:
     def __init__(self):
         self.n = 0
 
-    def fold(self, value):
+    def route(self, value, out):
         self.n += value
 
     def finalize(self):

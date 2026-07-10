@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: MIT OR Apache-2.0
  */
 
-//! The dedup part of the aggregation plane: a test-and-set membership set so a
-//! worker can admit each distinct key once (e.g. enqueue each URL a single time).
+//! A test-and-set membership set so a worker can admit each distinct key once
+//! (e.g. enqueue each URL a single time).
 
 use std::any::{Any, TypeId};
 use std::collections::hash_map::DefaultHasher;

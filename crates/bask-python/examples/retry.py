@@ -39,19 +39,19 @@ class Proxy:
     def process(self, task, ctx):
         if any(task.url.endswith(suffix) for suffix in self.blocks):
             raise RuntimeError(f"{self.name} cannot reach {task.url}")
-        ctx.aggregate(Served, (task.url, self.name))
+        ctx.route(Served, (task.url, self.name))
 
 
 engine.register(Fetch, Proxy("eu", (".ru", ".onion")), label="eu")
 engine.register(Fetch, Proxy("us", (".cn", ".onion")), label="us")
 
 
-@engine.aggregator
+@engine.router
 class Served:
     def __init__(self):
         self.hits = []
 
-    def fold(self, hit):
+    def route(self, hit, out):
         self.hits.append(hit)
 
     def finalize(self):

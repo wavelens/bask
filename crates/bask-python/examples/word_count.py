@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Wavelens GmbH <info@wavelens.io>
 #
 # SPDX-License-Identifier: MIT OR Apache-2.0
-"""Canonical map -> aggregate pipeline: split documents into words (emit),
-count words in a separate aggregation plane."""
+"""Canonical map -> reduce pipeline: split documents into words (emit), count words
+in a separate routing plane."""
 from bask import Engine
 
 
@@ -27,15 +27,15 @@ def split(doc, ctx):
 
 @engine.worker(Word)
 def count(word, ctx):
-    ctx.aggregate(WordCount, word.value)
+    ctx.route(WordCount, word.value)
 
 
-@engine.aggregator
+@engine.router
 class WordCount:
     def __init__(self):
         self.counts = {}
 
-    def fold(self, word):
+    def route(self, word, out):
         self.counts[word] = self.counts.get(word, 0) + 1
 
     def finalize(self):
