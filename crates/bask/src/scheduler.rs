@@ -228,6 +228,10 @@ pub(crate) struct Interrupt {
     pub catch_ctrl_c: bool,
 }
 
+/// A callback invoked once per flush epoch, letting a dynamic front-end (e.g. the Python
+/// bindings) contribute buffered emissions from routers the core cannot name.
+pub(crate) type FlushHook = Box<dyn FnMut(&mut Emit) + Send>;
+
 /// How a single `process` invocation ended.
 enum Outcome {
     Done(anyhow::Result<()>),
@@ -246,6 +250,7 @@ pub(crate) async fn run(
     seeds: Vec<Envelope>,
     mut monitor: Option<Box<dyn Monitor>>,
     sample_interval: Duration,
+    mut flush_hook: Option<FlushHook>,
 ) -> crate::Result<RunReport> {
     for group in registry.groups.values() {
         for inst in &group.instances {
@@ -350,11 +355,14 @@ pub(crate) async fn run(
                 }
             }
         }
-        if shutdown.is_triggered() || routers.is_empty() {
+        if shutdown.is_triggered() || (routers.is_empty() && flush_hook.is_none()) {
             break;
         }
         let mut out = Emit::default();
         routers.flush_all(&mut out);
+        if let Some(hook) = flush_hook.as_mut() {
+            hook(&mut out);
+        }
         let envelopes = out.envelopes;
         if envelopes.is_empty() {
             break;
