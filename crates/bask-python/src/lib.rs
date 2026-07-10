@@ -364,6 +364,35 @@ impl Engine {
             builder = builder.seed_dyn(seed.key, seed.type_name, payload);
         }
 
+        // Flush Python routers each epoch, so a batching router's trailing batch still
+        // flows before the run ends (model 2), mirroring the core flush-epoch.
+        let flush_routers = routers.clone_ref(py);
+        builder = builder.flush_hook(move |out| {
+            Python::attach(|py| {
+                let Ok(values) = flush_routers.bind(py).call_method0("values") else {
+                    return;
+                };
+                let Ok(iter) = values.try_iter() else {
+                    return;
+                };
+                for router in iter.flatten() {
+                    if !router.hasattr("flush").unwrap_or(false) {
+                        continue;
+                    }
+                    let Ok(collected) = Bound::new(py, RouterOut { buffer: Vec::new() }) else {
+                        continue;
+                    };
+                    if router.call_method1("flush", (&collected,)).is_err() {
+                        continue;
+                    }
+                    let buffered = std::mem::take(&mut collected.borrow_mut().buffer);
+                    for (key, type_name, payload) in buffered {
+                        out.emit_dyn(key, type_name, Box::new(payload));
+                    }
+                }
+            });
+        });
+
         let engine = builder.build();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
