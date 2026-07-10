@@ -248,6 +248,42 @@ impl DynWorker for ChunkerBridge {
     }
 }
 
+/// A pyarrow view of the Rust row-count aggregator, driven by the `bask.tasks.RowBatch`
+/// router: push batches, get full groups back, and flush the remainder at end-of-run.
+#[pyclass]
+struct RowAggregator {
+    inner: bask_tasks::RowAggregator,
+}
+
+#[pymethods]
+impl RowAggregator {
+    #[new]
+    fn new(rows: usize) -> Self {
+        RowAggregator {
+            inner: bask_tasks::RowAggregator::new(rows),
+        }
+    }
+
+    /// Push a pyarrow RecordBatch; returns any full group(s) ready to emit.
+    fn push(&mut self, py: Python<'_>, batch: &Bound<'_, PyAny>) -> PyResult<Vec<Py<PyAny>>> {
+        let batch = RecordBatch::from_pyarrow_bound(batch)?;
+        self.inner
+            .push(batch)
+            .into_iter()
+            .map(|b| b.to_pyarrow(py).map(|o| o.unbind()))
+            .collect()
+    }
+
+    /// Drain the buffered rows into a final group at end-of-run.
+    fn flush(&mut self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
+        self.inner
+            .flush()
+            .into_iter()
+            .map(|b| b.to_pyarrow(py).map(|o| o.unbind()))
+            .collect()
+    }
+}
+
 /// Handed to each Python worker as `ctx`.
 #[pyclass]
 struct Ctx {
@@ -672,5 +708,6 @@ impl Engine {
 fn _bask(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Engine>()?;
     m.add_class::<PyShutdown>()?;
+    m.add_class::<RowAggregator>()?;
     Ok(())
 }

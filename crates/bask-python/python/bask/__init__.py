@@ -221,6 +221,16 @@ class Engine:
         self._chunkers.append((source_cls, piece_cls, rows, label, concurrency))
         return self
 
+    def row_batch(self, key: type, group_cls: type, rows: int) -> "Engine":
+        """Register a Rust-backed row-count aggregating router under `key`: feed it with
+        `ctx.route(key, batch)`, and it emits `group_cls(batch)` once at least `rows` rows
+        accumulate, flushing the remainder at end-of-run. `report.output(key)` is the group
+        count."""
+        from .tasks import RowBatch
+
+        self._routers[key] = RowBatch(group_cls, rows)
+        return self
+
     def seed(self, task: Any) -> "Engine":
         self._seeds.append(task)
         return self
