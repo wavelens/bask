@@ -12,11 +12,13 @@ use std::time::Duration;
 
 use tokio::sync::Semaphore;
 
+use crate::deadletter::DeadLetterSink;
 use crate::dedup::{Dedup, Dedups};
 use crate::interrupt::Shutdown;
 use crate::monitor::Monitor;
 use crate::registry::{Group, Instance, Registry};
 use crate::report::RunReport;
+use crate::resource::Attrs;
 use crate::retry::RetryPolicy;
 use crate::router::{Emit, Router, Routers};
 use crate::scheduler::{self, Interrupt};
@@ -29,6 +31,9 @@ struct InstanceSpec {
     concurrency: Option<usize>,
     timeout: Option<Duration>,
     type_name: &'static str,
+    attrs: Attrs,
+    requires: Vec<String>,
+    retry: Option<RetryPolicy>,
 }
 
 type RouterFactory = Box<dyn FnOnce(&mut Routers, usize)>;
@@ -49,6 +54,8 @@ pub struct EngineBuilder {
     monitor: Option<Box<dyn Monitor>>,
     sample_interval: Duration,
     flush_hook: Option<scheduler::FlushHook>,
+    resources: HashMap<String, usize>,
+    dead_letter: Option<Arc<dyn DeadLetterSink>>,
 }
 
 pub struct Engine {
@@ -63,6 +70,7 @@ pub struct Engine {
     monitor: Option<Box<dyn Monitor>>,
     sample_interval: Duration,
     flush_hook: Option<scheduler::FlushHook>,
+    dead_letter: Option<Arc<dyn DeadLetterSink>>,
 }
 
 impl Engine {
@@ -82,6 +90,8 @@ impl Engine {
             monitor: None,
             sample_interval: Duration::from_millis(200),
             flush_hook: None,
+            resources: HashMap::new(),
+            dead_letter: None,
         }
     }
 
@@ -98,6 +108,7 @@ impl Engine {
             self.monitor,
             self.sample_interval,
             self.flush_hook,
+            self.dead_letter,
         )
         .await
     }
@@ -118,6 +129,9 @@ impl EngineBuilder {
             concurrency: cfg.concurrency,
             timeout: cfg.timeout,
             type_name: std::any::type_name::<W>(),
+            attrs: cfg.attrs,
+            requires: cfg.requires,
+            retry: cfg.retry,
         };
         self.specs
             .entry(RouteKey::Static(TypeId::of::<W::Task>()))
@@ -141,6 +155,9 @@ impl EngineBuilder {
             concurrency: cfg.concurrency,
             timeout: cfg.timeout,
             type_name,
+            attrs: cfg.attrs,
+            requires: cfg.requires,
+            retry: cfg.retry,
         };
         self.specs.entry(RouteKey::Dyn(key)).or_default().push(spec);
         self
@@ -169,6 +186,20 @@ impl EngineBuilder {
     /// emissions from routers the core cannot name (used by the Python bindings).
     pub fn flush_hook<F: FnMut(&mut Emit) + Send + 'static>(mut self, hook: F) -> Self {
         self.flush_hook = Some(Box::new(hook));
+        self
+    }
+
+    /// Declare a named resource pool with `permits` slots, shared across every instance
+    /// that [`requires`](crate::WorkerCfg::requires) it (e.g. `resource("gpu", 4)`).
+    pub fn resource(mut self, name: impl Into<String>, permits: usize) -> Self {
+        self.resources.insert(name.into(), permits.max(1));
+        self
+    }
+
+    /// Route terminally-failed tasks (retries exhausted or [`RetryOn::Fatal`](crate::RetryOn))
+    /// to a sink, which receives the type-erased payload alongside the error.
+    pub fn dead_letter<S: DeadLetterSink>(mut self, sink: S) -> Self {
+        self.dead_letter = Some(Arc::new(sink));
         self
     }
 
@@ -249,6 +280,11 @@ impl EngineBuilder {
             grace: self.grace,
             catch_ctrl_c: self.catch_ctrl_c,
         };
+        let pools: HashMap<String, Arc<Semaphore>> = self
+            .resources
+            .into_iter()
+            .map(|(name, permits)| (name, Arc::new(Semaphore::new(permits))))
+            .collect();
         let mut registry = Registry::default();
         for (key, specs) in self.specs {
             assert!(
@@ -263,6 +299,15 @@ impl EngineBuilder {
                     let id = i as u16;
                     let label = s.label.unwrap_or_else(|| format!("{}#{id}", s.type_name));
                     let cap = s.concurrency.unwrap_or(concurrency).max(1);
+                    let resources = s
+                        .requires
+                        .iter()
+                        .map(|name| {
+                            pools.get(name).cloned().unwrap_or_else(|| {
+                                panic!("worker requires undeclared resource {name:?}")
+                            })
+                        })
+                        .collect();
                     Instance {
                         worker: s.worker,
                         label,
@@ -271,6 +316,9 @@ impl EngineBuilder {
                         capacity: cap,
                         active: AtomicUsize::new(0),
                         timeout: s.timeout.or(default_timeout),
+                        attrs: s.attrs,
+                        resources,
+                        retry: s.retry,
                     }
                 })
                 .collect();
@@ -304,6 +352,7 @@ impl EngineBuilder {
             monitor: self.monitor,
             sample_interval: self.sample_interval,
             flush_hook: self.flush_hook,
+            dead_letter: self.dead_letter,
         }
     }
 

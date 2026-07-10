@@ -6,6 +6,8 @@
 
 use std::any::{Any, TypeId};
 
+use crate::resource::Select;
+
 /// Any `Send + Sync + 'static` value is a task; there is no central enum to edit.
 /// `Sync` lets a worker borrow the payload across `.await`; plain data satisfies it.
 pub trait Task: Send + Sync + 'static {}
@@ -19,13 +21,17 @@ pub(crate) enum RouteKey {
     Dyn(u64),
 }
 
-/// A type-erased task plus the engine metadata that rides alongside it.
+/// A type-erased task plus the engine metadata that rides alongside it. On a retry the
+/// envelope also carries the instance it last ran on and the constraint the next pick
+/// must honour, so attribute-aware selection has a reference point.
 pub(crate) struct Envelope {
     pub key: RouteKey,
     pub type_name: &'static str,
     pub payload: Box<dyn Any + Send + Sync>,
     pub attempt: u32,
     pub tried: TriedMask,
+    pub last: Option<u16>,
+    pub select: Option<Select>,
 }
 
 impl Envelope {
@@ -36,6 +42,8 @@ impl Envelope {
             payload: Box::new(task),
             attempt: 0,
             tried: TriedMask::empty(),
+            last: None,
+            select: None,
         }
     }
 
@@ -46,6 +54,8 @@ impl Envelope {
             payload,
             attempt: 0,
             tried: TriedMask::empty(),
+            last: None,
+            select: None,
         }
     }
 }
