@@ -6,15 +6,16 @@
 flowchart TD
     seed([Seed tasks]) --> Q[[Task Queue · bounded async]]
     Q -->|pull by type| R{Router}
-    R -->|select instance · skip failed| WG
+    R -->|select instance · attribute-aware| WG
     subgraph WG [Worker group · per task type]
         direction LR
-        WA[instance · proxy A]
-        WB[instance · proxy B]
+        WA[instance · gpu a100]
+        WB[instance · gpu h100]
     end
     WG -->|emit new tasks| Q
     WG -->|route| A[Routing plane · fold · route · filter · batch]
-    WG -. on error · retry on another instance .-> Q
+    WG -. on error · retry same/other/attr .-> Q
+    WG -. exhausted or fatal .-> DL([Dead-letter sink])
     Q -. backpressure .-> WG
     R -. queue empty and all idle .-> Z{{Quiescence}}
     A --> F[finalize]
@@ -130,6 +131,33 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 ```
+
+## Resource-aware retry
+
+Instances self-describe with attributes and may draw from named resource pools; a worker
+steers its own retry by attaching a hint to the error, and terminally failed tasks go to a
+dead-letter sink. Defaults need no configuration.
+
+```rust
+Engine::builder()
+    .resource("gpu", 2) // a pool of 2 permits shared across instances
+    .worker_cfg(Trainer { vram_gb: 40 }, WorkerCfg::new().attr("gpu", "a100").requires("gpu"))
+    .worker_cfg(Trainer { vram_gb: 80 }, WorkerCfg::new().attr("gpu", "h100").requires("gpu"))
+    .retry(RetryPolicy::new().max_attempts(2).jitter(0.2))
+    .dead_letter(|dl| eprintln!("dropped {}: {}", dl.task_type, dl.error))
+    .seed(TrainJob { size_gb: 60 })
+    .run()
+    .await?;
+
+// inside Trainer::process, when the job will not fit this gpu:
+return Err(anyhow::anyhow!("out of memory")).retry_on(RetryOn::DifferentAttr("gpu".into()));
+```
+
+The retry lands least-loaded on an instance whose `gpu` attribute differs from the one that
+failed (here the h100). Hints are `SameInstance`, `DifferentInstance`, `DifferentAttr`,
+`AnyWith(predicate)`, and `Fatal`; a policy attaches per worker with `WorkerCfg::retry`. In
+Python, raise `different_attr("gpu")` or `Fatal(...)` and pass `resources=` and `dead_letter=`
+to `Engine`.
 
 ## IO plane
 

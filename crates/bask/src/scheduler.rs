@@ -11,13 +11,15 @@ use std::time::Duration;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc};
 
 use crate::context::Context;
+use crate::deadletter::{DeadLetter, DeadLetterSink};
 use crate::dedup::Dedups;
 use crate::interrupt::{Cancel, Shutdown};
 use crate::metrics::{Snapshot, WorkerStat};
 use crate::monitor::Monitor;
 use crate::registry::Registry;
 use crate::report::{AtomicStats, RunReport, TaskFailure};
-use crate::retry::{InstanceChoice, RetryPolicy};
+use crate::resource::Select;
+use crate::retry::{Decision, RetryPolicy};
 use crate::router::{Emit, Routers};
 use crate::task::{Envelope, RouteKey, TriedMask};
 
@@ -90,27 +92,22 @@ impl Queue {
     }
 }
 
-/// The concurrency permits a running task holds. When a worker parks in `emit`
-/// awaiting queue capacity it releases them so the dispatcher can drain other
-/// work, then reacquires before resuming: a producing task never blocks the
-/// only consumer, so the bounded queue cannot deadlock (progress invariant).
+/// The concurrency permits a running task holds: the global slot, its instance slot,
+/// and any named resource pools it draws from. When a worker parks in `emit` awaiting
+/// queue capacity it releases them all so the dispatcher can drain other work (and no
+/// scarce resource is pinned by a parked task), then reacquires in the same order
+/// before resuming: a producing task never blocks the only consumer, so the bounded
+/// queue cannot deadlock (progress invariant).
 pub(crate) struct RunSlot {
-    global: Arc<Semaphore>,
-    instance: Arc<Semaphore>,
-    held: Mutex<Option<(OwnedSemaphorePermit, OwnedSemaphorePermit)>>,
+    sems: Vec<Arc<Semaphore>>,
+    held: Mutex<Option<Vec<OwnedSemaphorePermit>>>,
 }
 
 impl RunSlot {
-    fn new(
-        global: Arc<Semaphore>,
-        instance: Arc<Semaphore>,
-        global_permit: OwnedSemaphorePermit,
-        instance_permit: OwnedSemaphorePermit,
-    ) -> Self {
+    fn new(sems: Vec<Arc<Semaphore>>, permits: Vec<OwnedSemaphorePermit>) -> Self {
         Self {
-            global,
-            instance,
-            held: Mutex::new(Some((global_permit, instance_permit))),
+            sems,
+            held: Mutex::new(Some(permits)),
         }
     }
 
@@ -119,19 +116,11 @@ impl RunSlot {
     }
 
     pub(crate) async fn reacquire(&self) {
-        let global = self
-            .global
-            .clone()
-            .acquire_owned()
-            .await
-            .expect("semaphore closed");
-        let instance = self
-            .instance
-            .clone()
-            .acquire_owned()
-            .await
-            .expect("semaphore closed");
-        *self.held.lock().unwrap() = Some((global, instance));
+        let mut permits = Vec::with_capacity(self.sems.len());
+        for sem in &self.sems {
+            permits.push(sem.clone().acquire_owned().await.expect("semaphore closed"));
+        }
+        *self.held.lock().unwrap() = Some(permits);
     }
 }
 
@@ -251,6 +240,7 @@ pub(crate) async fn run(
     mut monitor: Option<Box<dyn Monitor>>,
     sample_interval: Duration,
     mut flush_hook: Option<FlushHook>,
+    dead_letter: Option<Arc<dyn DeadLetterSink>>,
 ) -> crate::Result<RunReport> {
     for group in registry.groups.values() {
         for inst in &group.instances {
@@ -341,6 +331,7 @@ pub(crate) async fn run(
                         in_flight: in_flight.clone(),
                         queue: queue.clone(),
                         retry: retry.clone(),
+                        dead_letter: dead_letter.clone(),
                         stats: stats.clone(),
                         failures: failures.clone(),
                         cancel: cancel.clone(),
@@ -497,6 +488,7 @@ struct Dispatch {
     in_flight: Arc<InFlight>,
     queue: Queue,
     retry: RetryPolicy,
+    dead_letter: Option<Arc<dyn DeadLetterSink>>,
     stats: Arc<AtomicStats>,
     failures: Arc<Mutex<Vec<TaskFailure>>>,
     cancel: Cancel,
@@ -516,52 +508,98 @@ fn dispatch(d: Dispatch) {
             in_flight,
             queue,
             retry,
+            dead_letter,
             stats,
             failures,
             cancel,
             unfinished,
         } = d;
 
-        let Some(group) = registry.groups.get(&env.key) else {
-            drop(permit);
+        // Record a terminal failure and hand the type-erased payload to the dead-letter
+        // sink, if any, so nothing is dropped silently.
+        let fail = |type_name: &'static str,
+                    payload: Box<dyn std::any::Any + Send + Sync>,
+                    attempts: u32,
+                    error: String,
+                    instance: Option<String>| {
             stats.failed.fetch_add(1, SeqCst);
             failures.lock().unwrap().push(TaskFailure {
-                task_type: env.type_name,
-                instance: "-".to_string(),
-                attempts: env.attempt + 1,
-                error: "no worker registered for task type".to_string(),
+                task_type: type_name,
+                instance: instance.clone().unwrap_or_else(|| "-".to_string()),
+                attempts,
+                error: error.clone(),
             });
+            if let Some(sink) = dead_letter.as_ref() {
+                sink.dead_letter(DeadLetter {
+                    task_type: type_name,
+                    payload,
+                    attempts,
+                    error,
+                    instance,
+                });
+            }
             in_flight.dec();
+        };
+
+        let Some(group) = registry.groups.get(&env.key) else {
+            drop(permit);
+            let (type_name, attempts) = (env.type_name, env.attempt + 1);
+            fail(
+                type_name,
+                env.payload,
+                attempts,
+                "no worker registered for task type".to_string(),
+                None,
+            );
             return;
         };
 
-        let avoid = matches!(retry.on_retry, InstanceChoice::AvoidFailed);
-        let inst = match group.select(env.tried, avoid) {
-            Some(i) => i,
-            None => {
-                env.tried = TriedMask::empty();
-                match group.select(env.tried, avoid) {
-                    Some(i) => i,
-                    None => {
-                        drop(permit);
-                        stats.failed.fetch_add(1, SeqCst);
-                        in_flight.dec();
-                        return;
-                    }
-                }
-            }
+        // The constraint the failing instance chose for this retry (default on first
+        // dispatch); reset and fall back to any instance only when it is exhaustible.
+        let select = env.select.clone().unwrap_or(Select::AvoidTried);
+        let inst = group.select(env.tried, env.last, &select).or_else(|| {
+            select
+                .resets()
+                .then(|| group.select(TriedMask::empty(), env.last, &Select::Any))
+                .flatten()
+        });
+        let Some(inst) = inst else {
+            drop(permit);
+            let (type_name, attempts) = (env.type_name, env.attempt + 1);
+            fail(
+                type_name,
+                env.payload,
+                attempts,
+                "no instance satisfies the retry constraint".to_string(),
+                None,
+            );
+            return;
         };
         let inst_id = inst.id;
         let inst_label = inst.label.clone();
+        let policy = inst.retry.clone().unwrap_or_else(|| retry.clone());
 
+        // Acquire the instance slot and one permit per required resource pool, then hold
+        // them (with the global slot) in the run slot so backpressure releases them all.
         let iperm = inst
             .permits
             .clone()
             .acquire_owned()
             .await
             .expect("instance semaphore closed");
+        let mut sems = vec![sem, inst.permits.clone()];
+        let mut permits = vec![permit, iperm];
+        for pool in &inst.resources {
+            let rperm = pool
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("resource semaphore closed");
+            sems.push(pool.clone());
+            permits.push(rperm);
+        }
         inst.active.fetch_add(1, SeqCst);
-        let run = Arc::new(RunSlot::new(sem, inst.permits.clone(), permit, iperm));
+        let run = Arc::new(RunSlot::new(sems, permits));
         let ctx = Context {
             queue: queue.clone(),
             in_flight: in_flight.clone(),
@@ -605,43 +643,40 @@ fn dispatch(d: Dispatch) {
             }
             Err(err) => {
                 let next = env.attempt + 1;
-                if next < retry.max_attempts {
-                    stats.retried.fetch_add(1, SeqCst);
-                    env.attempt = next;
-                    if avoid {
+                match policy.decide(next, &err) {
+                    Decision::Retry { select, delay } => {
+                        stats.retried.fetch_add(1, SeqCst);
+                        env.attempt = next;
                         env.tried = env.tried.with(inst_id);
-                    }
-                    match retry.delay(next) {
-                        None => {
-                            let _ = queue.send(env).await;
-                        }
-                        Some(delay) => {
-                            let queue = queue.clone();
-                            let cancel = cancel.clone();
-                            let in_flight = in_flight.clone();
-                            let unfinished = unfinished.clone();
-                            tokio::spawn(async move {
-                                tokio::select! {
-                                    _ = tokio::time::sleep(delay) => {
-                                        let _ = queue.send(env).await;
+                        env.last = Some(inst_id);
+                        env.select = Some(select);
+                        match delay {
+                            None => {
+                                let _ = queue.send(env).await;
+                            }
+                            Some(delay) => {
+                                let queue = queue.clone();
+                                let cancel = cancel.clone();
+                                let in_flight = in_flight.clone();
+                                let unfinished = unfinished.clone();
+                                tokio::spawn(async move {
+                                    tokio::select! {
+                                        _ = tokio::time::sleep(delay) => {
+                                            let _ = queue.send(env).await;
+                                        }
+                                        _ = cancel.cancelled() => {
+                                            unfinished.fetch_add(1, SeqCst);
+                                            in_flight.dec();
+                                        }
                                     }
-                                    _ = cancel.cancelled() => {
-                                        unfinished.fetch_add(1, SeqCst);
-                                        in_flight.dec();
-                                    }
-                                }
-                            });
+                                });
+                            }
                         }
                     }
-                } else {
-                    stats.failed.fetch_add(1, SeqCst);
-                    failures.lock().unwrap().push(TaskFailure {
-                        task_type: env.type_name,
-                        instance: inst_label,
-                        attempts: next,
-                        error: format!("{err:#}"),
-                    });
-                    in_flight.dec();
+                    Decision::Fail => {
+                        let (type_name, error) = (env.type_name, format!("{err:#}"));
+                        fail(type_name, env.payload, next, error, Some(inst_label));
+                    }
                 }
             }
         }
