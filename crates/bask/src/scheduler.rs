@@ -18,33 +18,119 @@ use crate::monitor::Monitor;
 use crate::registry::Registry;
 use crate::report::{AtomicStats, RunReport, TaskFailure};
 use crate::retry::{InstanceChoice, RetryPolicy};
-use crate::task::{Envelope, TriedMask};
+use crate::task::{Envelope, RouteKey, TriedMask};
 
-/// A clonable producer handle that keeps global and per-type queue depth accurate.
+/// Outcome of a non-blocking enqueue attempt.
+pub(crate) enum Sent {
+    Ok,
+    Full(Envelope),
+    Closed,
+}
+
+/// A clonable producer handle over the bounded queue that keeps global and
+/// per-type depth counters accurate across every enqueue path.
 #[derive(Clone)]
 pub(crate) struct Queue {
-    tx: mpsc::UnboundedSender<Envelope>,
+    tx: mpsc::Sender<Envelope>,
     registry: Arc<Registry>,
     depth: Arc<AtomicUsize>,
 }
 
 impl Queue {
-    pub fn send(&self, env: Envelope) -> Result<(), Envelope> {
+    fn note_enqueued(&self, key: RouteKey) {
         self.depth.fetch_add(1, SeqCst);
-        if let Some(group) = self.registry.groups.get(&env.key) {
+        if let Some(group) = self.registry.groups.get(&key) {
             group.queued.fetch_add(1, SeqCst);
         }
-        match self.tx.send(env) {
-            Ok(()) => Ok(()),
-            Err(err) => {
-                let env = err.0;
-                self.depth.fetch_sub(1, SeqCst);
-                if let Some(group) = self.registry.groups.get(&env.key) {
-                    group.queued.fetch_sub(1, SeqCst);
-                }
-                Err(env)
-            }
+    }
+
+    pub(crate) fn note_dequeued(&self, key: RouteKey) {
+        self.depth.fetch_sub(1, SeqCst);
+        if let Some(group) = self.registry.groups.get(&key) {
+            group.queued.fetch_sub(1, SeqCst);
         }
+    }
+
+    /// Non-blocking enqueue for the hot path; hands the envelope back when full.
+    pub(crate) fn try_send(&self, env: Envelope) -> Sent {
+        let key = env.key;
+        match self.tx.try_send(env) {
+            Ok(()) => {
+                self.note_enqueued(key);
+                Sent::Ok
+            }
+            Err(mpsc::error::TrySendError::Full(env)) => Sent::Full(env),
+            Err(mpsc::error::TrySendError::Closed(_)) => Sent::Closed,
+        }
+    }
+
+    /// Async enqueue that awaits capacity; the caller must not hold a run permit.
+    pub(crate) async fn send(&self, env: Envelope) -> Result<(), Envelope> {
+        let key = env.key;
+        match self.tx.send(env).await {
+            Ok(()) => {
+                self.note_enqueued(key);
+                Ok(())
+            }
+            Err(err) => Err(err.0),
+        }
+    }
+
+    /// Blocking enqueue for synchronous front-ends running off the async threads.
+    pub(crate) fn blocking_send(&self, env: Envelope) -> Result<(), Envelope> {
+        let key = env.key;
+        match self.tx.blocking_send(env) {
+            Ok(()) => {
+                self.note_enqueued(key);
+                Ok(())
+            }
+            Err(err) => Err(err.0),
+        }
+    }
+}
+
+/// The concurrency permits a running task holds. When a worker parks in `emit`
+/// awaiting queue capacity it releases them so the dispatcher can drain other
+/// work, then reacquires before resuming: a producing task never blocks the
+/// only consumer, so the bounded queue cannot deadlock (progress invariant).
+pub(crate) struct RunSlot {
+    global: Arc<Semaphore>,
+    instance: Arc<Semaphore>,
+    held: Mutex<Option<(OwnedSemaphorePermit, OwnedSemaphorePermit)>>,
+}
+
+impl RunSlot {
+    fn new(
+        global: Arc<Semaphore>,
+        instance: Arc<Semaphore>,
+        global_permit: OwnedSemaphorePermit,
+        instance_permit: OwnedSemaphorePermit,
+    ) -> Self {
+        Self {
+            global,
+            instance,
+            held: Mutex::new(Some((global_permit, instance_permit))),
+        }
+    }
+
+    pub(crate) fn release(&self) {
+        *self.held.lock().unwrap() = None;
+    }
+
+    pub(crate) async fn reacquire(&self) {
+        let global = self
+            .global
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("semaphore closed");
+        let instance = self
+            .instance
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("semaphore closed");
+        *self.held.lock().unwrap() = Some((global, instance));
     }
 }
 
@@ -53,9 +139,13 @@ impl Queue {
 pub struct Emitter {
     queue: Queue,
     in_flight: Arc<InFlight>,
+    run: Arc<RunSlot>,
 }
 
 impl Emitter {
+    /// Enqueue a dynamic task. On a full queue this yields the caller's run permit
+    /// and blocks the (off-runtime) calling thread until capacity frees; the GIL
+    /// bounds concurrency on resume, so it does not reacquire.
     pub fn emit_dyn(
         &self,
         key: u64,
@@ -63,15 +153,26 @@ impl Emitter {
         payload: Box<dyn std::any::Any + Send + Sync>,
     ) -> crate::Result<()> {
         self.in_flight.inc();
-        if self
+        match self
             .queue
-            .send(Envelope::new_dyn(key, type_name, payload))
-            .is_err()
+            .try_send(Envelope::new_dyn(key, type_name, payload))
         {
-            self.in_flight.dec();
-            return Err(crate::Error::Stopped);
+            Sent::Ok => Ok(()),
+            Sent::Full(env) => {
+                self.run.release();
+                match self.queue.blocking_send(env) {
+                    Ok(()) => Ok(()),
+                    Err(_) => {
+                        self.in_flight.dec();
+                        Err(crate::Error::Stopped)
+                    }
+                }
+            }
+            Sent::Closed => {
+                self.in_flight.dec();
+                Err(crate::Error::Stopped)
+            }
         }
-        Ok(())
     }
 }
 
@@ -81,6 +182,7 @@ impl crate::context::Context {
         Emitter {
             queue: self.queue.clone(),
             in_flight: self.in_flight.clone(),
+            run: self.run.clone(),
         }
     }
 }
@@ -125,6 +227,7 @@ pub(crate) async fn run(
     dedups: Arc<Dedups>,
     retry: RetryPolicy,
     concurrency: usize,
+    queue_capacity: usize,
     seeds: Vec<Envelope>,
     mut monitor: Option<Box<dyn Monitor>>,
     sample_interval: Duration,
@@ -141,17 +244,34 @@ pub(crate) async fn run(
     let stats = Arc::new(AtomicStats::default());
     let failures = Arc::new(Mutex::new(Vec::<TaskFailure>::new()));
     let depth = Arc::new(AtomicUsize::new(0));
-    let (tx, mut rx) = mpsc::unbounded_channel::<Envelope>();
+    let (tx, mut rx) = mpsc::channel::<Envelope>(queue_capacity.max(1));
     let queue = Queue {
         tx,
         registry: registry.clone(),
         depth: depth.clone(),
     };
 
-    for env in seeds {
+    // Count seeds up front so the loop cannot terminate before they land, then feed
+    // them through the bounded queue concurrently with draining (seeds may exceed it).
+    for _ in &seeds {
         in_flight.inc();
-        let _ = queue.send(env);
     }
+    tokio::spawn({
+        let queue = queue.clone();
+        let in_flight = in_flight.clone();
+        async move {
+            let mut pending = seeds.len();
+            for env in seeds {
+                if queue.send(env).await.is_err() {
+                    break;
+                }
+                pending -= 1;
+            }
+            for _ in 0..pending {
+                in_flight.dec();
+            }
+        }
+    });
 
     let mut ticker = tokio::time::interval(sample_interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -161,10 +281,7 @@ pub(crate) async fn run(
         tokio::select! {
             maybe = rx.recv() => {
                 let Some(env) = maybe else { break };
-                depth.fetch_sub(1, SeqCst);
-                if let Some(group) = registry.groups.get(&env.key) {
-                    group.queued.fetch_sub(1, SeqCst);
-                }
+                queue.note_dequeued(env.key);
                 let permit = sem.clone().acquire_owned().await.expect("semaphore closed");
                 let shard = seq % shards;
                 seq = seq.wrapping_add(1);
@@ -172,6 +289,7 @@ pub(crate) async fn run(
                     env,
                     permit,
                     shard,
+                    sem: sem.clone(),
                     registry: registry.clone(),
                     aggregators: aggregators.clone(),
                     dedups: dedups.clone(),
@@ -248,6 +366,7 @@ struct Dispatch {
     env: Envelope,
     permit: OwnedSemaphorePermit,
     shard: usize,
+    sem: Arc<Semaphore>,
     registry: Arc<Registry>,
     aggregators: Arc<Aggregators>,
     dedups: Arc<Dedups>,
@@ -264,6 +383,7 @@ fn dispatch(d: Dispatch) {
             mut env,
             permit,
             shard,
+            sem,
             registry,
             aggregators,
             dedups,
@@ -273,9 +393,9 @@ fn dispatch(d: Dispatch) {
             stats,
             failures,
         } = d;
-        let _permit = permit; // released when this task ends, freeing a concurrency slot
 
         let Some(group) = registry.groups.get(&env.key) else {
+            drop(permit);
             stats.failed.fetch_add(1, SeqCst);
             failures.lock().unwrap().push(TaskFailure {
                 task_type: env.type_name,
@@ -295,6 +415,7 @@ fn dispatch(d: Dispatch) {
                 match group.select(env.tried, avoid) {
                     Some(i) => i,
                     None => {
+                        drop(permit);
                         stats.failed.fetch_add(1, SeqCst);
                         in_flight.dec();
                         return;
@@ -305,24 +426,26 @@ fn dispatch(d: Dispatch) {
         let inst_id = inst.id;
         let inst_label = inst.label.clone();
 
-        let _iperm = inst
+        let iperm = inst
             .permits
             .clone()
             .acquire_owned()
             .await
             .expect("instance semaphore closed");
         inst.active.fetch_add(1, SeqCst);
+        let run = Arc::new(RunSlot::new(sem, inst.permits.clone(), permit, iperm));
         let ctx = Context {
             queue: queue.clone(),
             in_flight: in_flight.clone(),
             aggregators: aggregators.clone(),
             dedups: dedups.clone(),
             shard,
+            run: run.clone(),
         };
         let res = inst.worker.process(env.payload.as_ref(), &ctx).await;
         inst.active.fetch_sub(1, SeqCst);
         drop(ctx);
-        drop(_iperm);
+        drop(run); // release concurrency permits before any backpressured re-enqueue
 
         match res {
             Ok(()) => {
@@ -340,13 +463,13 @@ fn dispatch(d: Dispatch) {
                     }
                     match retry.delay(next) {
                         None => {
-                            let _ = queue.send(env);
+                            let _ = queue.send(env).await;
                         }
                         Some(delay) => {
                             let queue = queue.clone();
                             tokio::spawn(async move {
                                 tokio::time::sleep(delay).await;
-                                let _ = queue.send(env);
+                                let _ = queue.send(env).await;
                             });
                         }
                     }

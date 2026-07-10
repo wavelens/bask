@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::aggregator::{Aggregator, Aggregators};
 use crate::dedup::{Dedup, Dedups};
-use crate::scheduler::{InFlight, Queue};
+use crate::scheduler::{InFlight, Queue, RunSlot, Sent};
 use crate::task::{Envelope, Task};
 
 /// Handed to every worker. Its only powers: spawn more work, contribute to aggregation.
@@ -18,17 +18,34 @@ pub struct Context {
     pub(crate) aggregators: Arc<Aggregators>,
     pub(crate) dedups: Arc<Dedups>,
     pub(crate) shard: usize,
+    pub(crate) run: Arc<RunSlot>,
 }
 
 impl Context {
-    /// Enqueue a new task of any type into the shared queue.
+    /// Enqueue a new task of any type into the shared queue, applying backpressure:
+    /// on a full queue the worker yields its run permit so the dispatcher can drain,
+    /// then reacquires it before returning, which keeps memory bounded without deadlock.
     pub async fn emit<T: Task>(&self, task: T) -> crate::Result<()> {
         self.in_flight.inc();
-        if self.queue.send(Envelope::new(task)).is_err() {
-            self.in_flight.dec();
-            return Err(crate::Error::Stopped);
+        match self.queue.try_send(Envelope::new(task)) {
+            Sent::Ok => Ok(()),
+            Sent::Full(env) => {
+                self.run.release();
+                let sent = self.queue.send(env).await;
+                self.run.reacquire().await;
+                match sent {
+                    Ok(()) => Ok(()),
+                    Err(_) => {
+                        self.in_flight.dec();
+                        Err(crate::Error::Stopped)
+                    }
+                }
+            }
+            Sent::Closed => {
+                self.in_flight.dec();
+                Err(crate::Error::Stopped)
+            }
         }
-        Ok(())
     }
 
     /// Contribute a value to an aggregator registered on the engine.
