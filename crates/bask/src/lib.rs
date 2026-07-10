@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: MIT OR Apache-2.0
  */
 
-//! bask — build any data pipeline as an emergent graph of tasks and workers.
+//! Bask - Build Tasks
 //!
 //! Two orthogonal planes: a compute plane of independent [`Worker`]s that consume
 //! typed [`Task`]s and emit more, and an aggregation plane of [`Aggregator`]s that

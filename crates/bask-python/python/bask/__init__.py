@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Wavelens GmbH <info@wavelens.io>
 #
 # SPDX-License-Identifier: MIT OR Apache-2.0
-"""bask: build any data pipeline as an emergent graph of tasks and workers.
+"""Bask: Build Tasks
 
 Workers consume typed tasks and may emit more; a separate aggregation plane
 collects results. Powered by the Rust `bask` engine via the `_bask` extension.
