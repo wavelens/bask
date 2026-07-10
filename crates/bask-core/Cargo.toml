@@ -1,0 +1,20 @@
+[package]
+name = "bask-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Core task-queue pipeline engine for bask (use the bask crate)"
+readme = "../../README.md"
+keywords = ["pipeline", "dataflow", "workers", "async", "engine"]
+categories = ["asynchronous", "concurrency"]
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+async-trait = "0.1"
+anyhow = "1"
+thiserror = "2"
+
+[package.metadata.docs.rs]
+all-features = true

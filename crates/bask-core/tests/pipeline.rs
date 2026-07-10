@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use bask::prelude::*;
+use bask_core::prelude::*;
 
 struct Document {
     text: String,

@@ -10,7 +10,8 @@ use std::sync::Arc;
 use arrow::array::{Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
-use bask::io::{Keyed, PostgresSink, Sink};
+use bask::formats::PostgresSink;
+use bask::io::{Keyed, Sink};
 
 /// Requires a reachable Postgres. Set `BASK_TEST_POSTGRES` to a connection string with a
 /// writable `bask_copy_test` table, then run `cargo test --features postgres -- --ignored`.

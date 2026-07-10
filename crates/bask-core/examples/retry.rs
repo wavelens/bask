@@ -9,7 +9,7 @@
 //! host no proxy can serve exhausts its retries and lands in the failure list.
 use std::time::Duration;
 
-use bask::prelude::*;
+use bask_core::prelude::*;
 
 struct Link {
     url: String,

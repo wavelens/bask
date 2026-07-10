@@ -29,9 +29,9 @@ async fn csv_to_parquet_through_the_engine() {
     let parquet = scratch("bask_io_csv_to_parquet.parquet");
     std::fs::write(&csv, "id,name\n10,alice\n20,bob\n30,carol\n").unwrap();
 
-    let sinks = SinkRegistry::<RecordBatch>::formats();
+    let sinks = bask::formats::record_sinks();
     let report = Engine::builder()
-        .worker(SourceWorker::new(SourceRegistry::<RecordBatch>::formats()))
+        .worker(SourceWorker::new(bask::formats::record_sources()))
         .worker_cfg(
             SinkWorker::open(&sinks, parquet.to_str().unwrap()).unwrap(),
             WorkerCfg::new().concurrency(1),
@@ -99,7 +99,7 @@ async fn blob_directory_copies_through_the_engine() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rotating_record_sink_splits_into_parts() {
     let base = scratch("bask_io_rotate.arrow");
-    let sinks = SinkRegistry::<RecordBatch>::formats();
+    let sinks = bask::formats::record_sinks();
     let mut sink = sinks
         .open(
             base.to_str().unwrap(),

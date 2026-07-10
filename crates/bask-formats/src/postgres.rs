@@ -14,7 +14,7 @@ use bytes::Bytes;
 use futures::SinkExt;
 use tokio_postgres::{Client, NoTls};
 
-use super::{Keyed, Sink, SinkRegistry, Target};
+use bask_io::{Keyed, Sink, SinkRegistry, Target};
 
 pub struct PostgresSink {
     conn_str: String,

@@ -1,0 +1,29 @@
+[package]
+name = "bask-formats"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Columnar formats (Arrow/Parquet/CSV/JSONL) and record IO for bask (use the bask crate)"
+readme = "../../README.md"
+keywords = ["pipeline", "arrow", "parquet", "csv", "columnar"]
+categories = ["asynchronous", "encoding"]
+
+[dependencies]
+bask-core.workspace = true
+bask-io.workspace = true
+async-trait = "0.1"
+anyhow = "1"
+tokio = { version = "1", features = ["rt", "sync"] }
+arrow = { version = "59", features = ["csv", "json", "ipc"] }
+parquet = { version = "59", features = ["arrow"] }
+bytes = { version = "1", optional = true }
+tokio-postgres = { version = "0.7", optional = true }
+futures = { version = "0.3", optional = true }
+
+[features]
+postgres = ["dep:tokio-postgres", "dep:futures", "dep:bytes"]
+
+[package.metadata.docs.rs]
+all-features = true
