@@ -10,7 +10,6 @@ use std::time::Duration;
 
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc};
 
-use crate::aggregator::Aggregators;
 use crate::context::Context;
 use crate::dedup::Dedups;
 use crate::interrupt::{Cancel, Shutdown};
@@ -19,6 +18,7 @@ use crate::monitor::Monitor;
 use crate::registry::Registry;
 use crate::report::{AtomicStats, RunReport, TaskFailure};
 use crate::retry::{InstanceChoice, RetryPolicy};
+use crate::router::{Emit, Routers};
 use crate::task::{Envelope, RouteKey, TriedMask};
 
 /// Outcome of a non-blocking enqueue attempt.
@@ -237,7 +237,7 @@ enum Outcome {
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run(
     registry: Arc<Registry>,
-    aggregators: Arc<Aggregators>,
+    routers: Arc<Routers>,
     dedups: Arc<Dedups>,
     retry: RetryPolicy,
     concurrency: usize,
@@ -307,46 +307,77 @@ pub(crate) async fn run(
     let mut ticker = tokio::time::interval(sample_interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-    // Phase 1: dispatch until the run drains on its own or a shutdown is requested.
+    // Phase 1: dispatch to quiescence, then flush routers; repeat until a flush epoch
+    // emits nothing, so a trailing batch still flows before the run ends.
     let shutdown_fut = shutdown.triggered();
     tokio::pin!(shutdown_fut);
     let mut seq: usize = 0;
-    while !in_flight.is_zero() {
-        if shutdown.is_triggered() {
-            break;
-        }
-        tokio::select! {
-            _ = &mut shutdown_fut => break,
-            maybe = rx.recv() => {
-                let Some(env) = maybe else { break };
-                queue.note_dequeued(env.key);
-                let permit = sem.clone().acquire_owned().await.expect("semaphore closed");
-                let shard = seq % shards;
-                seq = seq.wrapping_add(1);
-                dispatch(Dispatch {
-                    env,
-                    permit,
-                    shard,
-                    sem: sem.clone(),
-                    registry: registry.clone(),
-                    aggregators: aggregators.clone(),
-                    dedups: dedups.clone(),
-                    in_flight: in_flight.clone(),
-                    queue: queue.clone(),
-                    retry: retry.clone(),
-                    stats: stats.clone(),
-                    failures: failures.clone(),
-                    cancel: cancel.clone(),
-                    unfinished: unfinished.clone(),
-                });
+    'epochs: loop {
+        while !in_flight.is_zero() {
+            if shutdown.is_triggered() {
+                break;
             }
-            _ = in_flight.wait_idle() => {}
-            _ = ticker.tick() => {
-                if let Some(m) = monitor.as_mut() {
-                    m.sample(&snapshot(&registry, in_flight.count(), depth.load(SeqCst), &stats));
+            tokio::select! {
+                _ = &mut shutdown_fut => break,
+                maybe = rx.recv() => {
+                    let Some(env) = maybe else { break 'epochs };
+                    queue.note_dequeued(env.key);
+                    let permit = sem.clone().acquire_owned().await.expect("semaphore closed");
+                    let shard = seq % shards;
+                    seq = seq.wrapping_add(1);
+                    dispatch(Dispatch {
+                        env,
+                        permit,
+                        shard,
+                        sem: sem.clone(),
+                        registry: registry.clone(),
+                        routers: routers.clone(),
+                        dedups: dedups.clone(),
+                        in_flight: in_flight.clone(),
+                        queue: queue.clone(),
+                        retry: retry.clone(),
+                        stats: stats.clone(),
+                        failures: failures.clone(),
+                        cancel: cancel.clone(),
+                        unfinished: unfinished.clone(),
+                    });
+                }
+                _ = in_flight.wait_idle() => {}
+                _ = ticker.tick() => {
+                    if let Some(m) = monitor.as_mut() {
+                        m.sample(&snapshot(&registry, in_flight.count(), depth.load(SeqCst), &stats));
+                    }
                 }
             }
         }
+        if shutdown.is_triggered() || routers.is_empty() {
+            break;
+        }
+        let mut out = Emit::default();
+        routers.flush_all(&mut out);
+        let envelopes = out.envelopes;
+        if envelopes.is_empty() {
+            break;
+        }
+        for _ in &envelopes {
+            in_flight.inc();
+        }
+        tokio::spawn({
+            let queue = queue.clone();
+            let in_flight = in_flight.clone();
+            async move {
+                let mut pending = envelopes.len();
+                for env in envelopes {
+                    if queue.send(env).await.is_err() {
+                        break;
+                    }
+                    pending -= 1;
+                }
+                for _ in 0..pending {
+                    in_flight.dec();
+                }
+            }
+        });
     }
 
     // Phase 2: no new work is dispatched; let in-flight tasks finish within the grace
@@ -398,7 +429,7 @@ pub(crate) async fn run(
         }
     }
 
-    let outputs = aggregators.finalize_all();
+    let outputs = routers.finalize_all();
     let unique = dedups.sizes();
     let failures = std::mem::take(&mut *failures.lock().unwrap());
     let report = RunReport {
@@ -453,7 +484,7 @@ struct Dispatch {
     shard: usize,
     sem: Arc<Semaphore>,
     registry: Arc<Registry>,
-    aggregators: Arc<Aggregators>,
+    routers: Arc<Routers>,
     dedups: Arc<Dedups>,
     in_flight: Arc<InFlight>,
     queue: Queue,
@@ -472,7 +503,7 @@ fn dispatch(d: Dispatch) {
             shard,
             sem,
             registry,
-            aggregators,
+            routers,
             dedups,
             in_flight,
             queue,
@@ -526,7 +557,7 @@ fn dispatch(d: Dispatch) {
         let ctx = Context {
             queue: queue.clone(),
             in_flight: in_flight.clone(),
-            aggregators: aggregators.clone(),
+            routers: routers.clone(),
             dedups: dedups.clone(),
             shard,
             run: run.clone(),

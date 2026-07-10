@@ -13,7 +13,7 @@ flowchart TD
         WB[instance · proxy B]
     end
     WG -->|emit new tasks| Q
-    WG -->|contribute| A[Aggregation plane · sharded reducers]
+    WG -->|route| A[Routing plane · fold · route · filter · batch]
     WG -. on error · retry on another instance .-> Q
     Q -. backpressure .-> WG
     R -. queue empty and all idle .-> Z{{Quiescence}}
@@ -95,17 +95,21 @@ struct Count;
 impl Worker for Count {
     type Task = Word;
     async fn process(&self, word: &Word, ctx: &Context) -> anyhow::Result<()> {
-        ctx.aggregate::<WordCount>(word.0.clone());
+        ctx.route::<WordCount>(word.0.clone()).await?;
         Ok(())
     }
 }
 
+// A Router folds a task stream into state and may emit, route, filter, or batch
+// derived tasks. Emit nothing (as here) and it is a pure reducer.
 struct WordCount;
-impl Aggregator for WordCount {
+impl Router for WordCount {
     type Input = String;
     type State = HashMap<String, u64>;
     type Output = HashMap<String, u64>;
-    fn fold(state: &mut Self::State, word: String) { *state.entry(word).or_default() += 1; }
+    fn route(state: &mut Self::State, word: String, _out: &mut Emit) {
+        *state.entry(word).or_default() += 1;
+    }
     fn merge(left: &mut Self::State, right: Self::State) {
         for (word, n) in right { *left.entry(word).or_default() += n; }
     }
@@ -117,7 +121,7 @@ async fn main() -> anyhow::Result<()> {
     let report = Engine::builder()
         .worker(Split)
         .worker(Count)
-        .aggregator::<WordCount>()
+        .router::<WordCount>()
         .seed(Document { text: "the quick brown fox the fox".into() })
         .run()
         .await?;

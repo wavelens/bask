@@ -59,18 +59,19 @@ impl Worker for Proxy {
             anyhow::bail!("{} cannot reach {}", self.name, fetch.url);
         }
 
-        ctx.aggregate::<Served>((fetch.url.clone(), self.name.to_string()));
+        ctx.route::<Served>((fetch.url.clone(), self.name.to_string()))
+            .await?;
         Ok(())
     }
 }
 
 /// Records which proxy ultimately served each url.
 struct Served;
-impl Aggregator for Served {
+impl Router for Served {
     type Input = (String, String);
     type State = Vec<(String, String)>;
     type Output = Vec<(String, String)>;
-    fn fold(state: &mut Self::State, hit: (String, String)) {
+    fn route(state: &mut Self::State, hit: (String, String), _out: &mut Emit) {
         state.push(hit);
     }
     fn merge(left: &mut Self::State, right: Self::State) {
@@ -107,7 +108,7 @@ async fn main() -> anyhow::Result<()> {
             },
             WorkerCfg::new().label("us"),
         )
-        .aggregator::<Served>()
+        .router::<Served>()
         .dedup::<SeenUrls>()
         .retry(
             RetryPolicy::new()

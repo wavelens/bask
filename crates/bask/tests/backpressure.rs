@@ -30,17 +30,17 @@ struct Sink;
 impl Worker for Sink {
     type Task = Leaf;
     async fn process(&self, _leaf: &Leaf, ctx: &Context) -> anyhow::Result<()> {
-        ctx.aggregate::<Count>(1);
+        ctx.route::<Count>(1).await?;
         Ok(())
     }
 }
 
 struct Count;
-impl Aggregator for Count {
+impl Router for Count {
     type Input = u64;
     type State = u64;
     type Output = u64;
-    fn fold(state: &mut u64, input: u64) {
+    fn route(state: &mut u64, input: u64, _out: &mut Emit) {
         *state += input;
     }
     fn merge(left: &mut u64, right: u64) {
@@ -68,7 +68,7 @@ async fn fan_out_stays_bounded() {
     let report = Engine::builder()
         .worker(Source)
         .worker(Sink)
-        .aggregator::<Count>()
+        .router::<Count>()
         .concurrency(4)
         .queue_capacity(CAP)
         .sample_interval(Duration::from_micros(200))
@@ -95,7 +95,7 @@ async fn no_deadlock_when_concurrency_below_producers() {
         Engine::builder()
             .worker(Source)
             .worker(Sink)
-            .aggregator::<Count>()
+            .router::<Count>()
             .concurrency(1)
             .queue_capacity(8)
             .seed(Fan(N))
@@ -117,7 +117,7 @@ struct SelfFan;
 impl Worker for SelfFan {
     type Task = Job;
     async fn process(&self, job: &Job, ctx: &Context) -> anyhow::Result<()> {
-        ctx.aggregate::<Count>(1);
+        ctx.route::<Count>(1).await?;
         for _ in 0..job.fan {
             ctx.emit(Job { fan: 0 }).await?;
         }
@@ -132,7 +132,7 @@ async fn self_emitting_single_instance_does_not_deadlock() {
         Duration::from_secs(30),
         Engine::builder()
             .worker(SelfFan)
-            .aggregator::<Count>()
+            .router::<Count>()
             .concurrency(1)
             .queue_capacity(8)
             .seed(Job { fan: N })

@@ -48,17 +48,17 @@ impl Worker for Renderer {
     type Task = Render;
     async fn process(&self, _render: &Render, ctx: &Context) -> anyhow::Result<()> {
         tokio::time::sleep(Duration::from_millis(50)).await; // simulate rendering
-        ctx.aggregate::<Rendered>(1);
+        ctx.route::<Rendered>(1).await?;
         Ok(())
     }
 }
 
 struct Rendered;
-impl Aggregator for Rendered {
+impl Router for Rendered {
     type Input = u64;
     type State = u64;
     type Output = u64;
-    fn fold(state: &mut u64, input: u64) {
+    fn route(state: &mut u64, input: u64, _out: &mut Emit) {
         *state += input;
     }
 
@@ -79,7 +79,7 @@ async fn main() -> anyhow::Result<()> {
         .worker_cfg(Crawler, two().label("crawler-2"))
         .worker_cfg(Renderer, two().label("renderer-1"))
         .worker_cfg(Renderer, two().label("renderer-2"))
-        .aggregator::<Rendered>()
+        .router::<Rendered>()
         .concurrency(6)
         .monitor(LiveConsole::new())
         .sample_interval(Duration::from_millis(120))

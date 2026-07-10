@@ -30,17 +30,17 @@ struct Count;
 impl Worker for Count {
     type Task = Word;
     async fn process(&self, word: &Word, ctx: &Context) -> anyhow::Result<()> {
-        ctx.aggregate::<WordCount>(word.0.clone());
+        ctx.route::<WordCount>(word.0.clone()).await?;
         Ok(())
     }
 }
 
 struct WordCount;
-impl Aggregator for WordCount {
+impl Router for WordCount {
     type Input = String;
     type State = HashMap<String, u64>;
     type Output = HashMap<String, u64>;
-    fn fold(state: &mut Self::State, word: String) {
+    fn route(state: &mut Self::State, word: String, _out: &mut Emit) {
         *state.entry(word).or_default() += 1;
     }
     fn merge(left: &mut Self::State, right: Self::State) {
@@ -58,7 +58,7 @@ async fn counts_words_across_emitted_tasks() {
     let report = Engine::builder()
         .worker(Split)
         .worker(Count)
-        .aggregator::<WordCount>()
+        .router::<WordCount>()
         .seed(Document {
             text: "a b a c b a".to_string(),
         })
@@ -85,17 +85,17 @@ impl Worker for Flaky {
         if self.fail {
             anyhow::bail!("instance is down");
         }
-        ctx.aggregate::<Hits>(1);
+        ctx.route::<Hits>(1).await?;
         Ok(())
     }
 }
 
 struct Hits;
-impl Aggregator for Hits {
+impl Router for Hits {
     type Input = u64;
     type State = u64;
     type Output = u64;
-    fn fold(state: &mut u64, input: u64) {
+    fn route(state: &mut u64, input: u64, _out: &mut Emit) {
         *state += input;
     }
     fn merge(left: &mut u64, right: u64) {
@@ -111,7 +111,7 @@ async fn retry_lands_on_a_different_instance() {
     let report = Engine::builder()
         .worker_cfg(Flaky { fail: true }, WorkerCfg::new().label("proxy-A"))
         .worker_cfg(Flaky { fail: false }, WorkerCfg::new().label("proxy-B"))
-        .aggregator::<Hits>()
+        .router::<Hits>()
         .retry(RetryPolicy::new().max_attempts(2).avoid_failed())
         .concurrency(1)
         .seed(Ping)
@@ -133,7 +133,7 @@ async fn retry_lands_on_a_different_instance() {
 async fn exhausted_retries_are_reported() {
     let report = Engine::builder()
         .worker(Flaky { fail: true })
-        .aggregator::<Hits>()
+        .router::<Hits>()
         .retry(RetryPolicy::new().max_attempts(3))
         .seed(Ping)
         .run()

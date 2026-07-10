@@ -8,8 +8,8 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
 
-use crate::aggregator::Aggregator;
 use crate::dedup::Dedup;
+use crate::router::Router;
 
 #[derive(Default)]
 pub(crate) struct AtomicStats {
@@ -43,7 +43,7 @@ pub struct TaskFailure {
     pub error: String,
 }
 
-/// The outcome of a run: aggregator outputs, counters, and terminal failures.
+/// The outcome of a run: router outputs, counters, and terminal failures.
 pub struct RunReport {
     pub(crate) outputs: HashMap<TypeId, Box<dyn Any + Send>>,
     pub(crate) unique: HashMap<TypeId, usize>,
@@ -56,10 +56,10 @@ pub struct RunReport {
 }
 
 impl RunReport {
-    pub fn output<A: Aggregator>(&self) -> Option<&A::Output> {
+    pub fn output<R: Router>(&self) -> Option<&R::Output> {
         self.outputs
-            .get(&TypeId::of::<A>())
-            .and_then(|b| b.downcast_ref::<A::Output>())
+            .get(&TypeId::of::<R>())
+            .and_then(|b| b.downcast_ref::<R::Output>())
     }
 
     /// The number of distinct keys admitted by dedup set `D`.

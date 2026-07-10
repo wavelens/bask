@@ -13,11 +13,11 @@ use bask::prelude::*;
 struct Ping;
 
 struct Hits;
-impl Aggregator for Hits {
+impl Router for Hits {
     type Input = u64;
     type State = u64;
     type Output = u64;
-    fn fold(state: &mut u64, input: u64) {
+    fn route(state: &mut u64, input: u64, _out: &mut Emit) {
         *state += input;
     }
     fn merge(left: &mut u64, right: u64) {
@@ -38,7 +38,7 @@ impl Worker for Fickle {
         if self.hang {
             tokio::time::sleep(Duration::from_secs(3600)).await;
         }
-        ctx.aggregate::<Hits>(1);
+        ctx.route::<Hits>(1).await?;
         Ok(())
     }
 }
@@ -60,7 +60,7 @@ async fn timeout_is_retried_on_another_instance() {
                     .label("fast")
                     .timeout(Duration::from_millis(50)),
             )
-            .aggregator::<Hits>()
+            .router::<Hits>()
             .retry(RetryPolicy::new().max_attempts(2).avoid_failed())
             .concurrency(2)
             .seed(Ping)
@@ -86,7 +86,7 @@ async fn exhausted_timeouts_fail_terminally() {
                 Fickle { hang: true },
                 WorkerCfg::new().timeout(Duration::from_millis(30)),
             )
-            .aggregator::<Hits>()
+            .router::<Hits>()
             .retry(RetryPolicy::new().max_attempts(3))
             .seed(Ping)
             .run(),
@@ -123,7 +123,7 @@ struct Fast;
 impl Worker for Fast {
     type Task = FastTask;
     async fn process(&self, _task: &FastTask, ctx: &Context) -> anyhow::Result<()> {
-        ctx.aggregate::<Hits>(1);
+        ctx.route::<Hits>(1).await?;
         Ok(())
     }
 }
@@ -137,7 +137,7 @@ async fn timeout_releases_permits() {
         Engine::builder()
             .worker_cfg(Hang, WorkerCfg::new().timeout(Duration::from_millis(50)))
             .worker(Fast)
-            .aggregator::<Hits>()
+            .router::<Hits>()
             .concurrency(1)
             .seed(HangTask)
             .seed(FastTask)
