@@ -96,3 +96,27 @@ impl Cancel {
         self.latch.wait().await;
     }
 }
+
+/// A `'static`, clonable, read-only view of a run's cancellation signal, for front-ends
+/// (e.g. the Python bindings) whose workers run off the async runtime and poll it.
+/// Obtained via [`Context::cancellation`](crate::Context::cancellation).
+#[derive(Clone)]
+pub struct Cancellation {
+    latch: Latch,
+}
+
+impl Cancellation {
+    pub(crate) fn new(cancel: &Cancel) -> Self {
+        Cancellation {
+            latch: cancel.latch.clone(),
+        }
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.latch.is_set()
+    }
+
+    pub async fn cancelled(&self) {
+        self.latch.wait().await;
+    }
+}

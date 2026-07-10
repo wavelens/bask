@@ -36,7 +36,7 @@ pub use context::Context;
 pub use dedup::Dedup;
 pub use engine::{Engine, EngineBuilder};
 pub use error::{Error, Result};
-pub use interrupt::Shutdown;
+pub use interrupt::{Cancellation, Shutdown};
 pub use metrics::{Snapshot, WorkerStat};
 pub use monitor::{LiveConsole, Monitor};
 pub use report::{RunReport, Stats, TaskFailure};

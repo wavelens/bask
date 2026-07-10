@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::aggregator::{Aggregator, Aggregators};
 use crate::dedup::{Dedup, Dedups};
-use crate::interrupt::Cancel;
+use crate::interrupt::{Cancel, Cancellation};
 use crate::scheduler::{InFlight, Queue, RunSlot, Sent};
 use crate::task::{Envelope, Task};
 
@@ -70,5 +70,11 @@ impl Context {
     /// Resolves once the run is cancelled; select against it to abort a long operation.
     pub async fn cancelled(&self) {
         self.cancel.cancelled().await;
+    }
+
+    /// A detached, pollable cancellation handle usable for the run's lifetime; used by
+    /// dynamic front-ends whose workers execute off the async runtime.
+    pub fn cancellation(&self) -> Cancellation {
+        Cancellation::new(&self.cancel)
     }
 }

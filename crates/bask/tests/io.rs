@@ -11,8 +11,8 @@ use arrow::array::Int64Array;
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
 use bask::io::{
-    Bytes, Keyed, Read, ReadOptions, SinkRegistry, SinkWorker, Source, SourceRegistry, SourceWorker,
-    Target, WriteOptions,
+    Bytes, Keyed, Read, ReadOptions, SinkRegistry, SinkWorker, Source, SourceRegistry,
+    SourceWorker, Target, WriteOptions,
 };
 use bask::prelude::*;
 
