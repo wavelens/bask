@@ -38,6 +38,7 @@ pub struct EngineBuilder {
     dedups: Vec<DedupFactory>,
     retry: RetryPolicy,
     concurrency: usize,
+    queue_capacity: Option<usize>,
     seeds: Vec<Envelope>,
     monitor: Option<Box<dyn Monitor>>,
     sample_interval: Duration,
@@ -49,6 +50,7 @@ pub struct Engine {
     dedups: Dedups,
     retry: RetryPolicy,
     concurrency: usize,
+    queue_capacity: usize,
     seeds: Vec<Envelope>,
     monitor: Option<Box<dyn Monitor>>,
     sample_interval: Duration,
@@ -62,6 +64,7 @@ impl Engine {
             dedups: Vec::new(),
             retry: RetryPolicy::default(),
             concurrency: default_parallelism(),
+            queue_capacity: None,
             seeds: Vec::new(),
             monitor: None,
             sample_interval: Duration::from_millis(200),
@@ -75,6 +78,7 @@ impl Engine {
             Arc::new(self.dedups),
             self.retry,
             self.concurrency,
+            self.queue_capacity,
             self.seeds,
             self.monitor,
             self.sample_interval,
@@ -161,6 +165,13 @@ impl EngineBuilder {
         self
     }
 
+    /// Bound the shared task queue; `emit` blocks once it is full. Defaults to
+    /// `16 * concurrency` (floor 256) when unset.
+    pub fn queue_capacity(mut self, n: usize) -> Self {
+        self.queue_capacity = Some(n.max(1));
+        self
+    }
+
     pub fn retry(mut self, retry: RetryPolicy) -> Self {
         self.retry = retry;
         self
@@ -179,6 +190,9 @@ impl EngineBuilder {
 
     pub fn build(self) -> Engine {
         let concurrency = self.concurrency;
+        let queue_capacity = self
+            .queue_capacity
+            .unwrap_or_else(|| concurrency.saturating_mul(16).max(256));
         let mut registry = Registry::default();
         for (key, specs) in self.specs {
             assert!(
@@ -227,6 +241,7 @@ impl EngineBuilder {
             dedups,
             retry: self.retry,
             concurrency,
+            queue_capacity,
             seeds: self.seeds,
             monitor: self.monitor,
             sample_interval: self.sample_interval,
