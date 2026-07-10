@@ -15,17 +15,11 @@ mod blob;
 mod registry;
 mod worker;
 
-#[cfg(feature = "formats")]
-mod records;
-
 #[cfg(feature = "download")]
 mod download;
 
 #[cfg(feature = "object-store")]
 mod objectstore;
-
-#[cfg(feature = "postgres")]
-mod postgres;
 
 pub use bytes::Bytes;
 
@@ -33,17 +27,11 @@ pub use blob::{FileBlobSink, FileBlobSource};
 pub use registry::{SinkRegistry, SourceRegistry, Target};
 pub use worker::{Read, SinkWorker, SourceWorker};
 
-#[cfg(feature = "formats")]
-pub use records::{FormatSink, FormatSource};
-
 #[cfg(feature = "download")]
 pub use download::HttpSource;
 
 #[cfg(feature = "object-store")]
 pub use objectstore::{ObjectStoreSink, ObjectStoreSource};
-
-#[cfg(feature = "postgres")]
-pub use postgres::PostgresSink;
 
 /// A stable per-item identity, used for logging and, later, dedup and resume (#7).
 pub type Key = std::sync::Arc<str>;

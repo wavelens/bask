@@ -9,7 +9,7 @@
 //! concurrency update in place.
 use std::time::Duration;
 
-use bask::prelude::*;
+use bask_core::prelude::*;
 
 const MAX_DEPTH: u32 = 3;
 const FANOUT: u32 = 4;

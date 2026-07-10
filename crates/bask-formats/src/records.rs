@@ -13,7 +13,8 @@ use std::path::{Path, PathBuf};
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
 
-use super::{Keyed, Sink, SinkRegistry, Source, SourceRegistry, Target, WriteOptions};
+use bask_io::{Keyed, Sink, SinkRegistry, Source, SourceRegistry, Target, WriteOptions};
+
 use crate::formats::{
     ArrowFormat, ChunkReader, ChunkWriter, CsvFormat, Format, JsonlFormat, ParquetFormat,
 };
@@ -201,61 +202,57 @@ fn record_sink(
     }
 }
 
-impl SourceRegistry<RecordBatch> {
-    /// A record source registry for the built-in columnar formats: arrow, parquet, csv, jsonl.
-    pub fn formats() -> Self {
-        let mut registry = Self::new();
-        registry
-            .register_ext(&["parquet"], |t, o| {
-                Ok(Box::new(FormatSource::open(
-                    Box::new(ParquetFormat),
-                    t.path(),
-                    o.chunk_rows,
-                )?) as Box<dyn Source<RecordBatch>>)
-            })
-            .register_ext(&["arrow", "ipc"], |t, o| {
-                Ok(Box::new(FormatSource::open(
-                    Box::new(ArrowFormat),
-                    t.path(),
-                    o.chunk_rows,
-                )?) as Box<dyn Source<RecordBatch>>)
-            })
-            .register_ext(&["csv"], |t, o| {
-                Ok(Box::new(FormatSource::open(
-                    Box::new(CsvFormat),
-                    t.path(),
-                    o.chunk_rows,
-                )?) as Box<dyn Source<RecordBatch>>)
-            })
-            .register_ext(&["json", "jsonl", "ndjson"], |t, o| {
-                Ok(Box::new(FormatSource::open(
-                    Box::new(JsonlFormat),
-                    t.path(),
-                    o.chunk_rows,
-                )?) as Box<dyn Source<RecordBatch>>)
-            });
-        registry
-    }
+/// A record source registry for the built-in columnar formats: arrow, parquet, csv, jsonl.
+pub fn record_sources() -> SourceRegistry<RecordBatch> {
+    let mut registry = SourceRegistry::new();
+    registry
+        .register_ext(&["parquet"], |t, o| {
+            Ok(Box::new(FormatSource::open(
+                Box::new(ParquetFormat),
+                t.path(),
+                o.chunk_rows,
+            )?) as Box<dyn Source<RecordBatch>>)
+        })
+        .register_ext(&["arrow", "ipc"], |t, o| {
+            Ok(Box::new(FormatSource::open(
+                Box::new(ArrowFormat),
+                t.path(),
+                o.chunk_rows,
+            )?) as Box<dyn Source<RecordBatch>>)
+        })
+        .register_ext(&["csv"], |t, o| {
+            Ok(Box::new(FormatSource::open(
+                Box::new(CsvFormat),
+                t.path(),
+                o.chunk_rows,
+            )?) as Box<dyn Source<RecordBatch>>)
+        })
+        .register_ext(&["json", "jsonl", "ndjson"], |t, o| {
+            Ok(Box::new(FormatSource::open(
+                Box::new(JsonlFormat),
+                t.path(),
+                o.chunk_rows,
+            )?) as Box<dyn Source<RecordBatch>>)
+        });
+    registry
 }
 
-impl SinkRegistry<RecordBatch> {
-    /// A record sink registry for the built-in columnar formats: arrow, parquet, csv, jsonl.
-    /// Pass [`WriteOptions::rotate_rows`] to roll output into numbered part files.
-    pub fn formats() -> Self {
-        let mut registry = Self::new();
-        registry
-            .register_ext(&["parquet"], |t, o| {
-                record_sink(Box::new(ParquetFormat), t, o)
-            })
-            .register_ext(&["arrow", "ipc"], |t, o| {
-                record_sink(Box::new(ArrowFormat), t, o)
-            })
-            .register_ext(&["csv"], |t, o| record_sink(Box::new(CsvFormat), t, o))
-            .register_ext(&["json", "jsonl", "ndjson"], |t, o| {
-                record_sink(Box::new(JsonlFormat), t, o)
-            });
-        #[cfg(feature = "postgres")]
-        super::postgres::register_sink_builtins(&mut registry);
-        registry
-    }
+/// A record sink registry for the built-in columnar formats: arrow, parquet, csv, jsonl.
+/// Pass [`WriteOptions::rotate_rows`] to roll output into numbered part files.
+pub fn record_sinks() -> SinkRegistry<RecordBatch> {
+    let mut registry = SinkRegistry::new();
+    registry
+        .register_ext(&["parquet"], |t, o| {
+            record_sink(Box::new(ParquetFormat), t, o)
+        })
+        .register_ext(&["arrow", "ipc"], |t, o| {
+            record_sink(Box::new(ArrowFormat), t, o)
+        })
+        .register_ext(&["csv"], |t, o| record_sink(Box::new(CsvFormat), t, o))
+        .register_ext(&["json", "jsonl", "ndjson"], |t, o| {
+            record_sink(Box::new(JsonlFormat), t, o)
+        });
+    #[cfg(feature = "postgres")]
+    crate::postgres::register_sink_builtins(&mut registry);
+    registry
 }

@@ -1,0 +1,24 @@
+[package]
+name = "bask-tasks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Predefined workers and routers for bask: row-count batching and chunking (use the bask crate)"
+readme = "../../README.md"
+keywords = ["pipeline", "batching", "chunking", "arrow", "router"]
+categories = ["asynchronous", "concurrency"]
+
+[dependencies]
+bask-core.workspace = true
+bask-formats.workspace = true
+async-trait = "0.1"
+anyhow = "1"
+arrow = "59"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[package.metadata.docs.rs]
+all-features = true

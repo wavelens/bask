@@ -10,7 +10,7 @@
 //! fatally and lands in the dead-letter sink.
 use std::sync::{Arc, Mutex};
 
-use bask::prelude::*;
+use bask_core::prelude::*;
 
 struct TrainJob {
     id: u32,

@@ -1,6 +1,13 @@
 [workspace]
 resolver = "3"
-members = ["crates/bask", "crates/bask-python"]
+members = [
+    "crates/bask-core",
+    "crates/bask-io",
+    "crates/bask-formats",
+    "crates/bask-tasks",
+    "crates/bask",
+    "crates/bask-python",
+]
 
 [workspace.package]
 version = "0.1.1"
@@ -8,3 +15,9 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 authors = ["Wavelens GmbH <info@wavelens.io>"]
 repository = "https://github.com/wavelens/bask"
+
+[workspace.dependencies]
+bask-core = { path = "crates/bask-core", version = "0.1.1" }
+bask-io = { path = "crates/bask-io", version = "0.1.1" }
+bask-formats = { path = "crates/bask-formats", version = "0.1.1" }
+bask-tasks = { path = "crates/bask-tasks", version = "0.1.1" }

@@ -11,7 +11,7 @@
 //! Run with: cargo run --example io_convert --features formats
 
 use arrow::record_batch::RecordBatch;
-use bask::io::{Read, SinkRegistry, SinkWorker, SourceRegistry, SourceWorker};
+use bask::io::{Read, SinkWorker, SourceWorker};
 use bask::prelude::*;
 
 #[tokio::main]
@@ -21,9 +21,9 @@ async fn main() -> anyhow::Result<()> {
     let parquet = dir.join("bask_io_convert.parquet");
     std::fs::write(&csv, "id,name\n1,alice\n2,bob\n3,carol\n")?;
 
-    let sinks = SinkRegistry::<RecordBatch>::formats();
+    let sinks = bask::formats::record_sinks();
     let report = Engine::builder()
-        .worker(SourceWorker::new(SourceRegistry::<RecordBatch>::formats()))
+        .worker(SourceWorker::new(bask::formats::record_sources()))
         .worker_cfg(
             SinkWorker::open(&sinks, parquet.to_str().unwrap())?,
             WorkerCfg::new().label("parquet-out").concurrency(1),

@@ -10,9 +10,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::Mutex;
 
+use bask_core::{Context, Worker};
+
 use super::{Keyed, ReadOptions, Sink, SinkRegistry, SourceRegistry, WriteOptions};
-use crate::context::Context;
-use crate::worker::Worker;
 
 /// A seed task naming a target to read; routed to the [`SourceWorker`] for `Item`.
 /// Generic in `Item` so record and blob source workers never share a routing key.

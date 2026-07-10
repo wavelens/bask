@@ -322,14 +322,52 @@ dependencies = [
  "anyhow",
  "arrow",
  "async-trait",
+ "bask-core",
+ "bask-formats",
+ "bask-io",
+ "bask-tasks",
+ "object_store",
+ "tokio",
+]
+
+[[package]]
+name = "bask-core"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "bask-formats"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "async-trait",
+ "bask-core",
+ "bask-io",
+ "bytes",
+ "futures",
+ "parquet",
+ "tokio",
+ "tokio-postgres",
+]
+
+[[package]]
+name = "bask-io"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bask-core",
  "bytes",
  "futures",
  "object_store",
- "parquet",
  "reqwest",
- "thiserror",
  "tokio",
- "tokio-postgres",
  "url",
 ]
 
@@ -339,8 +377,20 @@ version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
- "bask",
+ "bask-core",
  "pyo3",
+ "tokio",
+]
+
+[[package]]
+name = "bask-tasks"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "async-trait",
+ "bask-core",
+ "bask-formats",
  "tokio",
 ]
 

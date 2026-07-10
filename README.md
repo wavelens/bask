@@ -187,6 +187,35 @@ sink), `download` (resumable HTTP fetch), `object-store` (S3/GCS/Azure), `postgr
 directory tree and writes blobs back out, and composes the network sources when their
 features are on.
 
+## Predefined tasks
+
+`bask::tasks` ships reusable stages built on the engine: `Chunker::<N>` splits a record
+batch into fixed-row pieces, and `RowBatch::<N>` is a router that re-aggregates a batch
+stream into groups of at least `N` rows, flushing the trailing group at end-of-run.
+
+```rust
+use bask::tasks::{Chunker, RowBatch};
+
+Engine::builder()
+    .worker(Chunker::<32>)          // split each Whole into 32-row Pieces
+    .router::<RowBatch<100>>()      // re-batch Pieces into >=100-row groups
+    // ...feed pieces with ctx.route::<RowBatch<100>>(piece) and consume the groups
+    .run()
+    .await?;
+```
+
+## Crates
+
+You depend only on `bask`; it re-exports the engine at the crate root and the rest behind
+features. The internals are separate crates so the engine stays dependency-light.
+
+| crate          | contents                                          | reached via                     |
+|----------------|---------------------------------------------------|---------------------------------|
+| `bask-core`    | engine: workers, routers, scheduler, retry        | `bask` root and `bask::prelude` |
+| `bask-io`      | pluggable source/sink IO plane                    | `bask::io` (feature `io`)       |
+| `bask-formats` | Arrow/Parquet/CSV/JSONL and record IO             | `bask::formats` (feature `formats`) |
+| `bask-tasks`   | predefined workers and routers (chunk, row-batch) | `bask::tasks` (feature `formats`) |
+
 ## Acknowledgements
 
 Developed by Wavelens GmbH. Support us by contributing.

@@ -9,7 +9,7 @@
 //! end-of-run. A second router reduces the per-batch sums into a grand total.
 //!
 //! Run with: cargo run --example router
-use bask::prelude::*;
+use bask_core::prelude::*;
 
 struct Reading(u64);
 struct Batch(Vec<u64>);

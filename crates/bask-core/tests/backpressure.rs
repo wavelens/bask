@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 use std::time::Duration;
 
-use bask::prelude::*;
+use bask_core::prelude::*;
 
 struct Fan(usize);
 struct Leaf;

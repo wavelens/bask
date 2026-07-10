@@ -1,0 +1,29 @@
+[package]
+name = "bask-io"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Pluggable IO plane (sources and sinks) for bask (use the bask crate)"
+readme = "../../README.md"
+keywords = ["pipeline", "io", "source", "sink", "streaming"]
+categories = ["asynchronous"]
+
+[dependencies]
+bask-core.workspace = true
+async-trait = "0.1"
+anyhow = "1"
+bytes = "1"
+tokio = { version = "1", features = ["rt", "fs", "sync"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
+object_store = { version = "0.11", features = ["aws"], optional = true }
+url = { version = "2", optional = true }
+futures = { version = "0.3", optional = true }
+
+[features]
+download = ["dep:reqwest"]
+object-store = ["dep:object_store", "dep:url", "dep:futures"]
+
+[package.metadata.docs.rs]
+all-features = true

@@ -6,55 +6,21 @@
 
 //! Bask - Build Tasks
 //!
-//! Two orthogonal planes: a compute plane of independent [`Worker`]s that consume
-//! typed [`Task`]s and emit more, and a routing plane of [`Router`]s that fold a task
-//! stream into state and may emit, route, filter, or batch derived tasks.
+//! The batteries-included facade. The engine lives in [`bask_core`] and is re-exported
+//! here at the crate root and via [`prelude`]; the pluggable IO plane, columnar formats,
+//! and predefined tasks are available as [`io`], [`formats`], and [`tasks`] once their
+//! features are on. Depend on `bask` and reach for the submodules you need.
 
-mod context;
-mod deadletter;
-mod dedup;
-mod engine;
-mod error;
-mod interrupt;
-mod metrics;
-mod monitor;
-mod registry;
-mod report;
-mod resource;
-mod retry;
-mod router;
-mod scheduler;
-mod task;
-mod worker;
+pub use bask_core::*;
 
+/// The pluggable IO plane: sources and sinks selected by extension or URI scheme.
 #[cfg(feature = "io")]
-pub mod io;
+pub use bask_io as io;
 
+/// Columnar file formats (Arrow, Parquet, CSV, JSONL) and the record IO adapters.
 #[cfg(feature = "formats")]
-pub mod formats;
+pub use bask_formats as formats;
 
-pub use context::Context;
-pub use deadletter::{DeadLetter, DeadLetterSink};
-pub use dedup::Dedup;
-pub use engine::{Engine, EngineBuilder};
-pub use error::{Error, Result};
-pub use interrupt::{Cancellation, Shutdown};
-pub use metrics::{Snapshot, WorkerStat};
-pub use monitor::{LiveConsole, Monitor};
-pub use report::{RunReport, Stats, TaskFailure};
-pub use resource::{Attrs, Select};
-pub use retry::{Backoff, RetryExt, RetryOn, RetryPolicy};
-pub use router::{Emit, Router};
-pub use scheduler::Emitter;
-pub use task::Task;
-pub use worker::{DynWorker, Worker, WorkerCfg};
-
-pub mod prelude {
-    pub use crate::{
-        Attrs, Backoff, Context, DeadLetter, DeadLetterSink, Dedup, Emit, Engine, LiveConsole,
-        Monitor, RetryExt, RetryOn, RetryPolicy, Router, RunReport, Select, Shutdown, Snapshot,
-        Task, Worker, WorkerCfg,
-    };
-    pub use anyhow;
-    pub use async_trait::async_trait;
-}
+/// Predefined workers and routers: row-count batching and chunking.
+#[cfg(feature = "formats")]
+pub use bask_tasks as tasks;

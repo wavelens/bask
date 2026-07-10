@@ -16,7 +16,7 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
-use bask::{
+use bask_core::{
     Backoff, Cancellation, Context, DeadLetter, DeadLetterSink, DynWorker, Emitter, LiveConsole,
     RetryExt, RetryOn, RetryPolicy, Shutdown, WorkerCfg,
 };
@@ -424,7 +424,7 @@ impl Engine {
             self.jitter,
         );
 
-        let mut builder = bask::Engine::builder()
+        let mut builder = bask_core::Engine::builder()
             .concurrency(self.concurrency)
             .retry(retry)
             .sample_interval(Duration::from_millis(self.sample_interval_ms));
