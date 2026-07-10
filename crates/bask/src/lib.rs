@@ -25,6 +25,9 @@ mod scheduler;
 mod task;
 mod worker;
 
+#[cfg(feature = "io")]
+pub mod io;
+
 #[cfg(feature = "formats")]
 pub mod formats;
 

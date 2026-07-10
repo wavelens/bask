@@ -14,10 +14,14 @@ use ::arrow::datatypes::SchemaRef;
 use ::arrow::record_batch::RecordBatch;
 
 pub mod arrow;
+pub mod csv;
+pub mod jsonl;
 pub mod parquet;
 mod rebatch;
 
 pub use self::arrow::ArrowFormat;
+pub use self::csv::CsvFormat;
+pub use self::jsonl::JsonlFormat;
 pub use self::parquet::ParquetFormat;
 
 /// One chunk of a stream: a columnar Arrow RecordBatch of a bounded number of rows.
@@ -51,7 +55,12 @@ pub fn for_path(path: &Path) -> anyhow::Result<Box<dyn Format>> {
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or_default();
-    let formats: [Box<dyn Format>; 2] = [Box::new(ArrowFormat), Box::new(ParquetFormat)];
+    let formats: [Box<dyn Format>; 4] = [
+        Box::new(ArrowFormat),
+        Box::new(ParquetFormat),
+        Box::new(CsvFormat),
+        Box::new(JsonlFormat),
+    ];
     for format in formats {
         if format.extensions().contains(&ext) {
             return Ok(format);

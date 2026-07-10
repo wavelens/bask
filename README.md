@@ -126,6 +126,34 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
+## IO plane
+
+`Source` and `Sink` are generic over the item type and selected by file extension or
+URI scheme from a registry, so adding a format is one trait impl plus a registration,
+never a core change. A `SourceWorker` streams a source into the pipeline under the same
+backpressure as any worker; a `SinkWorker` drains items out and finalizes on shutdown.
+
+```rust
+use arrow::record_batch::RecordBatch;
+use bask::io::{Read, SinkRegistry, SinkWorker, SourceRegistry, SourceWorker};
+use bask::prelude::*;
+
+// csv -> parquet: the format on each side is chosen from its extension.
+let sinks = SinkRegistry::<RecordBatch>::formats();
+Engine::builder()
+    .worker(SourceWorker::new(SourceRegistry::<RecordBatch>::formats()))
+    .worker_cfg(SinkWorker::open(&sinks, "out.parquet")?, WorkerCfg::new().concurrency(1))
+    .seed(Read::<RecordBatch>::new("in.csv"))
+    .run()
+    .await?;
+```
+
+Built-ins are feature-gated: `formats` (arrow, parquet, csv, jsonl and a row-rotating
+sink), `download` (resumable HTTP fetch), `object-store` (S3/GCS/Azure), `postgres`
+(`COPY` bulk-load). The byte plane (`SourceRegistry::<Bytes>::blobs()`) reads a file or
+directory tree and writes blobs back out, and composes the network sources when their
+features are on.
+
 ## Acknowledgements
 
 Developed by Wavelens GmbH. Support us by contributing.
