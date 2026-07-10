@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 """Bask: Build Tasks
 
-Workers consume typed tasks and may emit more; a separate aggregation plane
-collects results. Powered by the Rust `bask` engine via the `_bask` extension.
+Workers consume typed tasks and may emit more; a separate routing plane folds a
+task stream into results. Powered by the Rust `bask` engine via the `_bask` extension.
 """
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ class Retry:
 
 
 class Report:
-    """Outcome of a run: aggregator outputs, counters, and terminal failures."""
+    """Outcome of a run: router outputs, counters, and terminal failures."""
 
     def __init__(self, raw: dict, outputs: dict, unique: dict):
         self.processed: int = raw["processed"]
@@ -40,8 +40,8 @@ class Report:
         self._outputs = outputs
         self._unique = unique
 
-    def output(self, agg_cls: type) -> Any:
-        return self._outputs.get(agg_cls)
+    def output(self, router_cls: type) -> Any:
+        return self._outputs.get(router_cls)
 
     def unique(self, dedup_cls: type) -> int:
         """The number of distinct keys admitted by a dedup set."""
@@ -65,7 +65,7 @@ class _Registration:
 
 
 class Engine:
-    """Builds a pipeline from decorated workers and aggregators, then runs it."""
+    """Builds a pipeline from decorated workers and routers, then runs it."""
 
     def __init__(
         self,
@@ -85,7 +85,7 @@ class Engine:
         self._grace_ms = grace_ms
         self._catch_ctrl_c = catch_ctrl_c
         self._registrations: list[_Registration] = []
-        self._aggregators: dict[type, Any] = {}
+        self._routers: dict[type, Any] = {}
         self._dedups: dict[type, set] = {}
         self._seeds: list[Any] = []
 
@@ -122,9 +122,10 @@ class Engine:
         )
         return instance
 
-    def aggregator(self, cls: type) -> type:
-        """Decorator: register an aggregator class (fold/finalize)."""
-        self._aggregators[cls] = cls()
+    def router(self, cls: type) -> type:
+        """Decorator: register a router class. It implements `route(self, value, out)`
+        (fold state, optionally `out.emit(task)` to route/filter/batch) and `finalize`."""
+        self._routers[cls] = cls()
         return cls
 
     def dedup(self, marker: type) -> type:
@@ -153,8 +154,8 @@ class Engine:
             engine.register(reg.task_cls, reg.process, reg.label, reg.concurrency, reg.timeout_ms)
         for task in self._seeds:
             engine.seed(task)
-        raw = engine.run(self._aggregators, self._dedups, live, shutdown)
-        outputs = {cls: inst.finalize() for cls, inst in self._aggregators.items()}
+        raw = engine.run(self._routers, self._dedups, live, shutdown)
+        outputs = {cls: inst.finalize() for cls, inst in self._routers.items()}
         unique = {marker: len(seen) for marker, seen in self._dedups.items()}
         return Report(raw, outputs, unique)
 

@@ -40,10 +40,10 @@ fn class_key_name(cls: &Bound<'_, PyAny>) -> PyResult<(u64, String)> {
 }
 
 /// A registered Python worker: a `process(task, ctx)` callable plus the shared
-/// aggregator and dedup registries it folds into.
+/// router and dedup registries it feeds.
 struct PyWorker {
     process: Py<PyAny>,
-    aggregators: Py<PyAny>,
+    routers: Py<PyAny>,
     dedups: Py<PyAny>,
 }
 
@@ -54,7 +54,7 @@ impl DynWorker for PyWorker {
         payload: &(dyn Any + Send + Sync),
         ctx: &Context,
     ) -> anyhow::Result<()> {
-        let (task, process, aggregators, dedups) = Python::attach(|py| {
+        let (task, process, routers, dedups) = Python::attach(|py| {
             let task = payload
                 .downcast_ref::<Py<PyAny>>()
                 .expect("python payload")
@@ -62,7 +62,7 @@ impl DynWorker for PyWorker {
             (
                 task,
                 self.process.clone_ref(py),
-                self.aggregators.clone_ref(py),
+                self.routers.clone_ref(py),
                 self.dedups.clone_ref(py),
             )
         });
@@ -78,7 +78,7 @@ impl DynWorker for PyWorker {
                     Ctx {
                         emitter,
                         cancellation,
-                        aggregators,
+                        routers,
                         dedups,
                     },
                 )
@@ -105,7 +105,7 @@ impl DynWorker for PyWorker {
 struct Ctx {
     emitter: Emitter,
     cancellation: Cancellation,
-    aggregators: Py<PyAny>,
+    routers: Py<PyAny>,
     dedups: Py<PyAny>,
 }
 
@@ -124,11 +124,22 @@ impl Ctx {
         Ok(())
     }
 
-    /// Contribute a value to the aggregator registered for `agg_cls`.
-    fn aggregate(&self, py: Python<'_>, agg_cls: Py<PyAny>, value: Py<PyAny>) -> PyResult<()> {
-        let aggregator = self.aggregators.bind(py).get_item(agg_cls)?;
-        aggregator.call_method1("fold", (value,))?;
-        Ok(())
+    /// Feed a value to the router registered for `router_cls`. Its `route(value, out)`
+    /// folds the value into state and may `out.emit(task)` derived tasks, which are
+    /// enqueued here under the same backpressure as `emit`.
+    fn route(&self, py: Python<'_>, router_cls: Py<PyAny>, value: Py<PyAny>) -> PyResult<()> {
+        let router = self.routers.bind(py).get_item(router_cls)?;
+        let out = Bound::new(py, RouterOut { buffer: Vec::new() })?;
+        router.call_method1("route", (value, &out))?;
+        let buffered = std::mem::take(&mut out.borrow_mut().buffer);
+        py.detach(|| {
+            for (key, type_name, payload) in buffered {
+                self.emitter
+                    .emit_dyn(key, type_name, Box::new(payload))
+                    .map_err(|_| PyRuntimeError::new_err("engine stopped"))?;
+            }
+            Ok(())
+        })
     }
 
     /// Test-and-set against the dedup set `marker`: `True` the first time `key` is
@@ -149,6 +160,23 @@ impl Ctx {
     /// should poll this and return early.
     fn is_cancelled(&self) -> bool {
         self.cancellation.is_cancelled()
+    }
+}
+
+/// The emit handle a Python router receives as `out`; buffers tasks routed by class.
+#[pyclass]
+struct RouterOut {
+    buffer: Vec<(u64, &'static str, Py<PyAny>)>,
+}
+
+#[pymethods]
+impl RouterOut {
+    /// Emit a task downstream: none = filter, a new class = route, many = fan-out or a batch.
+    fn emit(&mut self, py: Python<'_>, task: Py<PyAny>) -> PyResult<()> {
+        let ty = task.bind(py).get_type();
+        let (key, name) = class_key_name(ty.as_any())?;
+        self.buffer.push((key, intern(key, &name), task));
+        Ok(())
     }
 }
 
@@ -272,11 +300,11 @@ impl Engine {
         Ok(())
     }
 
-    #[pyo3(signature = (aggregators, dedups, live=false, shutdown=None))]
+    #[pyo3(signature = (routers, dedups, live=false, shutdown=None))]
     fn run(
         &self,
         py: Python<'_>,
-        aggregators: Py<PyAny>,
+        routers: Py<PyAny>,
         dedups: Py<PyAny>,
         live: bool,
         shutdown: Option<Py<PyShutdown>>,
@@ -316,7 +344,7 @@ impl Engine {
         for reg in &self.registrations {
             let worker: Arc<dyn DynWorker> = Arc::new(PyWorker {
                 process: reg.process.clone_ref(py),
-                aggregators: aggregators.clone_ref(py),
+                routers: routers.clone_ref(py),
                 dedups: dedups.clone_ref(py),
             });
             let mut cfg = WorkerCfg::new();

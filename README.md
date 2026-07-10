@@ -49,15 +49,16 @@ def split(doc, ctx):
 
 @engine.worker(Word)
 def count(word, ctx):
-    ctx.aggregate(WordCount, word.value)
+    ctx.route(WordCount, word.value)
 
 
-@engine.aggregator
+# A router folds a value into state and may out.emit(task) to route, filter, or batch.
+@engine.router
 class WordCount:
     def __init__(self):
         self.counts = {}
 
-    def fold(self, word):
+    def route(self, word, out):
         self.counts[word] = self.counts.get(word, 0) + 1
 
     def finalize(self):
