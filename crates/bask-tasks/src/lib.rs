@@ -51,28 +51,66 @@ impl<const ROWS: usize> Worker for Chunker<ROWS> {
     }
 }
 
-/// Sharded accumulator for [`RowBatch`]: buffers batches until they reach the row target.
-#[derive(Default)]
-pub struct RowBatchState {
+/// A runtime row-count aggregator: push batches and get a full group back once the target
+/// is reached, then [`flush`](RowAggregator::flush) the remainder at end of stream. Shared
+/// by the [`RowBatch`] router and dynamic front-ends (the Python `row_batch` stage), so the
+/// aggregation lives in Rust either way.
+pub struct RowAggregator {
+    target: usize,
     schema: Option<SchemaRef>,
     buffer: Vec<RecordBatch>,
     rows: usize,
-    groups: usize,
 }
 
-impl RowBatchState {
-    fn drain(&mut self, out: &mut Emit) {
+impl RowAggregator {
+    pub fn new(target: usize) -> Self {
+        RowAggregator {
+            target: target.max(1),
+            schema: None,
+            buffer: Vec::new(),
+            rows: 0,
+        }
+    }
+
+    /// Push a batch; returns a full group once the target is reached (as one concatenated
+    /// batch, or the raw batches if their schemas disagree), else nothing.
+    pub fn push(&mut self, batch: RecordBatch) -> Vec<RecordBatch> {
+        if batch.num_rows() == 0 {
+            return Vec::new();
+        }
+        self.schema.get_or_insert_with(|| batch.schema());
+        self.rows += batch.num_rows();
+        self.buffer.push(batch);
+        if self.rows >= self.target {
+            self.take()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Drain any buffered rows into a final group.
+    pub fn flush(&mut self) -> Vec<RecordBatch> {
+        self.take()
+    }
+
+    fn take(&mut self) -> Vec<RecordBatch> {
         if self.buffer.is_empty() {
-            return;
+            return Vec::new();
         }
         let batches = std::mem::take(&mut self.buffer);
         self.rows = 0;
-        self.groups += 1;
         match self.schema.as_ref().map(|s| concat_batches(s, &batches)) {
-            Some(Ok(batch)) => out.emit(Batch(batch)),
-            _ => batches.into_iter().for_each(|b| out.emit(Batch(b))),
+            Some(Ok(batch)) => vec![batch],
+            _ => batches,
         }
     }
+}
+
+/// Sharded state for [`RowBatch`]: a lazily-sized aggregator plus the group count.
+#[derive(Default)]
+pub struct RowBatchState {
+    agg: Option<RowAggregator>,
+    groups: usize,
 }
 
 /// Aggregates a stream of record batches into [`Batch`]es of at least `ROWS` rows, routing
@@ -86,28 +124,27 @@ impl<const ROWS: usize> Router for RowBatch<ROWS> {
     type Output = usize;
 
     fn route(state: &mut Self::State, batch: RecordBatch, out: &mut Emit) {
-        if batch.num_rows() == 0 {
-            return;
-        }
-        state.schema.get_or_insert_with(|| batch.schema());
-        state.rows += batch.num_rows();
-        state.buffer.push(batch);
-        if state.rows >= ROWS.max(1) {
-            state.drain(out);
+        let group = state
+            .agg
+            .get_or_insert_with(|| RowAggregator::new(ROWS))
+            .push(batch);
+        if !group.is_empty() {
+            state.groups += 1;
+            group.into_iter().for_each(|b| out.emit(Batch(b)));
         }
     }
 
     fn merge(left: &mut Self::State, right: Self::State) {
         left.groups += right.groups;
-        left.rows += right.rows;
-        left.buffer.extend(right.buffer);
-        if left.schema.is_none() {
-            left.schema = right.schema;
-        }
     }
 
     fn flush(state: &mut Self::State, out: &mut Emit) {
-        state.drain(out);
+        if let Some(group) = state.agg.as_mut().map(RowAggregator::flush)
+            && !group.is_empty()
+        {
+            state.groups += 1;
+            group.into_iter().for_each(|b| out.emit(Batch(b)));
+        }
     }
 
     fn finalize(state: Self::State) -> Self::Output {

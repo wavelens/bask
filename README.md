@@ -226,6 +226,9 @@ engine.seed(Whole(pa.record_batch({"n": list(range(1_000_000))})))
 engine.run()
 ```
 
+`engine.row_batch(key, group_cls, rows)` registers the row-count aggregator the same way:
+feed it with `ctx.route(key, batch)` and it emits `group_cls(batch)` per group.
+
 ## Crates
 
 You depend only on `bask`; it re-exports the engine at the crate root and the rest behind
