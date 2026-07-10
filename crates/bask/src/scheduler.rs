@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tokio::sync::{mpsc, Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc};
 
 use crate::aggregator::Aggregators;
 use crate::context::Context;
@@ -63,7 +63,11 @@ impl Emitter {
         payload: Box<dyn std::any::Any + Send + Sync>,
     ) -> crate::Result<()> {
         self.in_flight.inc();
-        if self.queue.send(Envelope::new_dyn(key, type_name, payload)).is_err() {
+        if self
+            .queue
+            .send(Envelope::new_dyn(key, type_name, payload))
+            .is_err()
+        {
             self.in_flight.dec();
             return Err(crate::Error::Stopped);
         }
@@ -74,7 +78,10 @@ impl Emitter {
 impl crate::context::Context {
     /// A detached emit handle usable for the run's lifetime; used by dynamic front-ends.
     pub fn emitter(&self) -> Emitter {
-        Emitter { queue: self.queue.clone(), in_flight: self.in_flight.clone() }
+        Emitter {
+            queue: self.queue.clone(),
+            in_flight: self.in_flight.clone(),
+        }
     }
 }
 
@@ -87,7 +94,10 @@ pub(crate) struct InFlight {
 
 impl InFlight {
     fn new() -> Self {
-        Self { count: AtomicUsize::new(0), idle: Notify::new() }
+        Self {
+            count: AtomicUsize::new(0),
+            idle: Notify::new(),
+        }
     }
     pub fn inc(&self) {
         self.count.fetch_add(1, SeqCst);
@@ -132,7 +142,11 @@ pub(crate) async fn run(
     let failures = Arc::new(Mutex::new(Vec::<TaskFailure>::new()));
     let depth = Arc::new(AtomicUsize::new(0));
     let (tx, mut rx) = mpsc::unbounded_channel::<Envelope>();
-    let queue = Queue { tx, registry: registry.clone(), depth: depth.clone() };
+    let queue = Queue {
+        tx,
+        registry: registry.clone(),
+        depth: depth.clone(),
+    };
 
     for env in seeds {
         in_flight.inc();
@@ -186,10 +200,20 @@ pub(crate) async fn run(
     let outputs = aggregators.finalize_all();
     let unique = dedups.sizes();
     let failures = std::mem::take(&mut *failures.lock().unwrap());
-    let report = RunReport { outputs, unique, stats: stats.snapshot(), failures };
+    let report = RunReport {
+        outputs,
+        unique,
+        stats: stats.snapshot(),
+        failures,
+    };
 
     if let Some(m) = monitor.as_mut() {
-        m.sample(&snapshot(&registry, in_flight.count(), depth.load(SeqCst), &stats));
+        m.sample(&snapshot(
+            &registry,
+            in_flight.count(),
+            depth.load(SeqCst),
+            &stats,
+        ));
         m.finish(&report);
     }
 
@@ -281,8 +305,12 @@ fn dispatch(d: Dispatch) {
         let inst_id = inst.id;
         let inst_label = inst.label.clone();
 
-        let _iperm =
-            inst.permits.clone().acquire_owned().await.expect("instance semaphore closed");
+        let _iperm = inst
+            .permits
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("instance semaphore closed");
         inst.active.fetch_add(1, SeqCst);
         let ctx = Context {
             queue: queue.clone(),

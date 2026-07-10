@@ -37,7 +37,7 @@ pub trait DynWorker: Send + Sync + 'static {
         Ok(())
     }
     async fn process(&self, payload: &(dyn Any + Send + Sync), ctx: &Context)
-        -> anyhow::Result<()>;
+    -> anyhow::Result<()>;
     async fn on_stop(&self) -> anyhow::Result<()> {
         Ok(())
     }
@@ -56,9 +56,9 @@ impl<W: Worker> DynWorker for Holder<W> {
         payload: &(dyn Any + Send + Sync),
         ctx: &Context,
     ) -> anyhow::Result<()> {
-        let task = payload
-            .downcast_ref::<W::Task>()
-            .ok_or_else(|| anyhow::anyhow!("payload is not {}", std::any::type_name::<W::Task>()))?;
+        let task = payload.downcast_ref::<W::Task>().ok_or_else(|| {
+            anyhow::anyhow!("payload is not {}", std::any::type_name::<W::Task>())
+        })?;
         self.0.process(task, ctx).await
     }
 

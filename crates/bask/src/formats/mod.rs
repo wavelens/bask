@@ -47,7 +47,10 @@ pub trait Format: Send + Sync + 'static {
 
 /// Pick a built-in format by the path's file extension.
 pub fn for_path(path: &Path) -> anyhow::Result<Box<dyn Format>> {
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default();
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default();
     let formats: [Box<dyn Format>; 2] = [Box::new(ArrowFormat), Box::new(ParquetFormat)];
     for format in formats {
         if format.extensions().contains(&ext) {

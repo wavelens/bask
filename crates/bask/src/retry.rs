@@ -63,7 +63,11 @@ pub enum InstanceChoice {
 pub enum Backoff {
     None,
     Fixed(Duration),
-    Exponential { base: Duration, factor: f64, max: Duration },
+    Exponential {
+        base: Duration,
+        factor: f64,
+        max: Duration,
+    },
 }
 
 impl Backoff {

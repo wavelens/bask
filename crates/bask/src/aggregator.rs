@@ -28,7 +28,9 @@ pub(crate) struct Holder<A: Aggregator> {
 impl<A: Aggregator> Holder<A> {
     fn new(shards: usize) -> Self {
         Holder {
-            shards: (0..shards.max(1)).map(|_| Mutex::new(A::State::default())).collect(),
+            shards: (0..shards.max(1))
+                .map(|_| Mutex::new(A::State::default()))
+                .collect(),
         }
     }
     fn fold(&self, shard: usize, input: A::Input) {
@@ -64,7 +66,8 @@ pub(crate) struct Aggregators {
 
 impl Aggregators {
     pub fn insert<A: Aggregator>(&mut self, shards: usize) {
-        self.map.insert(TypeId::of::<A>(), Arc::new(Holder::<A>::new(shards)));
+        self.map
+            .insert(TypeId::of::<A>(), Arc::new(Holder::<A>::new(shards)));
     }
 
     pub fn fold<A: Aggregator>(&self, shard: usize, input: A::Input) {
@@ -79,6 +82,9 @@ impl Aggregators {
     }
 
     pub fn finalize_all(&self) -> HashMap<TypeId, Box<dyn Any + Send>> {
-        self.map.iter().map(|(k, v)| (*k, v.finalize_erased())).collect()
+        self.map
+            .iter()
+            .map(|(k, v)| (*k, v.finalize_erased()))
+            .collect()
     }
 }

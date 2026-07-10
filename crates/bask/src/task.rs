@@ -40,7 +40,13 @@ impl Envelope {
     }
 
     pub fn new_dyn(key: u64, type_name: &'static str, payload: Box<dyn Any + Send + Sync>) -> Self {
-        Envelope { key: RouteKey::Dyn(key), type_name, payload, attempt: 0, tried: TriedMask::empty() }
+        Envelope {
+            key: RouteKey::Dyn(key),
+            type_name,
+            payload,
+            attempt: 0,
+            tried: TriedMask::empty(),
+        }
     }
 }
 

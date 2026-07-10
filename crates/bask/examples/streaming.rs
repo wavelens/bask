@@ -15,7 +15,7 @@ use std::sync::Arc;
 use arrow::array::{ArrayRef, Int64Array};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
-use bask::formats::{for_path, Chunk, Format, ParquetFormat};
+use bask::formats::{Chunk, Format, ParquetFormat, for_path};
 use bask::prelude::*;
 
 fn schema() -> SchemaRef {
@@ -51,8 +51,12 @@ struct Summer;
 impl Worker for Summer {
     type Task = Batch;
     async fn process(&self, batch: &Batch, ctx: &Context) -> anyhow::Result<()> {
-        let column =
-            batch.0.column(0).as_any().downcast_ref::<Int64Array>().expect("int64 column");
+        let column = batch
+            .0
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("int64 column");
         let sum: i64 = column.iter().flatten().sum();
         ctx.aggregate::<Total>((batch.0.num_rows() as u64, sum));
         Ok(())
@@ -92,7 +96,10 @@ async fn main() -> anyhow::Result<()> {
         .worker(Reader)
         .worker(Summer)
         .aggregator::<Total>()
-        .seed(ReadFile { path: path.clone(), chunk_rows: 1024 })
+        .seed(ReadFile {
+            path: path.clone(),
+            chunk_rows: 1024,
+        })
         .run()
         .await?;
 

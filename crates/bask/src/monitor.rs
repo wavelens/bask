@@ -28,7 +28,11 @@ pub struct LiveConsole {
 
 impl LiveConsole {
     pub fn new() -> Self {
-        Self { last_lines: 0, tty: std::io::stdout().is_terminal(), start: None }
+        Self {
+            last_lines: 0,
+            tty: std::io::stdout().is_terminal(),
+            start: None,
+        }
     }
 
     fn frame(&mut self, s: &Snapshot) -> Vec<String> {
@@ -43,7 +47,10 @@ impl LiveConsole {
                 s.retried,
                 s.failed
             ),
-            format!("  {:<16}{:>9}{:>9}{:>9}", "worker", "active", "queued", "done"),
+            format!(
+                "  {:<16}{:>9}{:>9}{:>9}",
+                "worker", "active", "queued", "done"
+            ),
         ];
         for w in &s.workers {
             lines.push(format!(

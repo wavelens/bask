@@ -11,8 +11,8 @@ use std::path::Path;
 
 use arrow::array::RecordBatchReader;
 use arrow::datatypes::SchemaRef;
-use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 use parquet::arrow::ArrowWriter;
+use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 
 use super::{Chunk, ChunkReader, ChunkWriter, Format};
 
@@ -32,7 +32,9 @@ impl Format for ParquetFormat {
 
     fn open_writer(&self, path: &Path, schema: SchemaRef) -> anyhow::Result<Box<dyn ChunkWriter>> {
         let writer = ArrowWriter::try_new(File::create(path)?, schema, None)?;
-        Ok(Box::new(ParquetChunkWriter { writer: Some(writer) }))
+        Ok(Box::new(ParquetChunkWriter {
+            writer: Some(writer),
+        }))
     }
 }
 

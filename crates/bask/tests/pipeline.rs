@@ -59,7 +59,9 @@ async fn counts_words_across_emitted_tasks() {
         .worker(Split)
         .worker(Count)
         .aggregator::<WordCount>()
-        .seed(Document { text: "a b a c b a".to_string() })
+        .seed(Document {
+            text: "a b a c b a".to_string(),
+        })
         .run()
         .await
         .unwrap();
@@ -118,7 +120,11 @@ async fn retry_lands_on_a_different_instance() {
         .unwrap();
 
     assert_eq!(*report.output::<Hits>().unwrap(), 1);
-    assert!(report.failures.is_empty(), "unexpected failures: {:?}", report.failures);
+    assert!(
+        report.failures.is_empty(),
+        "unexpected failures: {:?}",
+        report.failures
+    );
     assert_eq!(report.stats.retried, 1);
     assert_eq!(report.stats.processed, 1);
 }

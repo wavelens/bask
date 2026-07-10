@@ -32,7 +32,9 @@ impl Format for ArrowFormat {
 
     fn open_writer(&self, path: &Path, schema: SchemaRef) -> anyhow::Result<Box<dyn ChunkWriter>> {
         let writer = FileWriter::try_new(File::create(path)?, &schema)?;
-        Ok(Box::new(ArrowIpcWriter { writer: Some(writer) }))
+        Ok(Box::new(ArrowIpcWriter {
+            writer: Some(writer),
+        }))
     }
 }
 

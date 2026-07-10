@@ -6,8 +6,8 @@
 
 use std::any::TypeId;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::time::Duration;
 
 use tokio::sync::Semaphore;
@@ -98,7 +98,10 @@ impl EngineBuilder {
             concurrency: cfg.concurrency,
             type_name: std::any::type_name::<W>(),
         };
-        self.specs.entry(RouteKey::Static(TypeId::of::<W::Task>())).or_default().push(spec);
+        self.specs
+            .entry(RouteKey::Static(TypeId::of::<W::Task>()))
+            .or_default()
+            .push(spec);
         self
     }
 
@@ -111,8 +114,12 @@ impl EngineBuilder {
         type_name: &'static str,
         cfg: WorkerCfg,
     ) -> Self {
-        let spec =
-            InstanceSpec { worker, label: cfg.label, concurrency: cfg.concurrency, type_name };
+        let spec = InstanceSpec {
+            worker,
+            label: cfg.label,
+            concurrency: cfg.concurrency,
+            type_name,
+        };
         self.specs.entry(RouteKey::Dyn(key)).or_default().push(spec);
         self
     }
@@ -129,13 +136,18 @@ impl EngineBuilder {
     }
 
     pub fn aggregator<A: Aggregator>(mut self) -> Self {
-        self.aggregators.push(Box::new(|aggs: &mut Aggregators, shards| aggs.insert::<A>(shards)));
+        self.aggregators
+            .push(Box::new(|aggs: &mut Aggregators, shards| {
+                aggs.insert::<A>(shards)
+            }));
         self
     }
 
     /// Register a dedup set; gate emission with [`Context::first_seen`](crate::Context::first_seen).
     pub fn dedup<D: Dedup>(mut self) -> Self {
-        self.dedups.push(Box::new(|dedups: &mut Dedups, shards| dedups.insert::<D>(shards)));
+        self.dedups.push(Box::new(|dedups: &mut Dedups, shards| {
+            dedups.insert::<D>(shards)
+        }));
         self
     }
 
@@ -169,7 +181,10 @@ impl EngineBuilder {
         let concurrency = self.concurrency;
         let mut registry = Registry::default();
         for (key, specs) in self.specs {
-            assert!(specs.len() <= 64, "at most 64 worker instances per task type");
+            assert!(
+                specs.len() <= 64,
+                "at most 64 worker instances per task type"
+            );
             let worker_type = specs.first().map_or("unknown", |s| s.type_name);
             let instances = specs
                 .into_iter()
@@ -224,5 +239,7 @@ impl EngineBuilder {
 }
 
 fn default_parallelism() -> usize {
-    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4)
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
 }

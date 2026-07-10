@@ -33,8 +33,16 @@ fn roundtrip_rechunks(format: impl Format, ext: &str) {
     let (mut rows, mut sum, mut chunks) = (0usize, 0i64, 0usize);
     while let Some(chunk) = reader.next_chunk().unwrap() {
         chunks += 1;
-        assert!(chunk.num_rows() <= 1024, "chunk of {} exceeds chunk_rows", chunk.num_rows());
-        let column = chunk.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+        assert!(
+            chunk.num_rows() <= 1024,
+            "chunk of {} exceeds chunk_rows",
+            chunk.num_rows()
+        );
+        let column = chunk
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
         rows += chunk.num_rows();
         sum += column.iter().flatten().sum::<i64>();
     }
@@ -42,7 +50,10 @@ fn roundtrip_rechunks(format: impl Format, ext: &str) {
 
     assert_eq!(rows, 5000);
     assert_eq!(sum, (0..5000).sum::<i64>());
-    assert!(chunks >= 5, "expected 5000 rows to re-chunk into >= 5 chunks, got {chunks}");
+    assert!(
+        chunks >= 5,
+        "expected 5000 rows to re-chunk into >= 5 chunks, got {chunks}"
+    );
 }
 
 #[test]

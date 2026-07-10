@@ -24,7 +24,9 @@ fn intern(key: u64, name: &str) -> &'static str {
     static NAMES: OnceLock<Mutex<HashMap<u64, &'static str>>> = OnceLock::new();
     let map = NAMES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut guard = map.lock().unwrap();
-    guard.entry(key).or_insert_with(|| Box::leak(name.to_owned().into_boxed_str()))
+    guard
+        .entry(key)
+        .or_insert_with(|| Box::leak(name.to_owned().into_boxed_str()))
 }
 
 /// The routing key of a class is its object pointer (equal to Python `id(cls)`).
@@ -49,8 +51,11 @@ impl DynWorker for PyWorker {
         payload: &(dyn Any + Send + Sync),
         ctx: &Context,
     ) -> anyhow::Result<()> {
-        let (task, process, aggregators, dedups) = Python::with_gil(|py| {
-            let task = payload.downcast_ref::<Py<PyAny>>().expect("python payload").clone_ref(py);
+        let (task, process, aggregators, dedups) = Python::attach(|py| {
+            let task = payload
+                .downcast_ref::<Py<PyAny>>()
+                .expect("python payload")
+                .clone_ref(py);
             (
                 task,
                 self.process.clone_ref(py),
@@ -63,10 +68,20 @@ impl DynWorker for PyWorker {
         // Run the (blocking) Python call off the async worker threads so the router
         // is never starved; the GIL still serializes Python execution.
         let outcome = tokio::task::spawn_blocking(move || -> Result<(), String> {
-            Python::with_gil(|py| {
-                let ctx = Bound::new(py, Ctx { emitter, aggregators, dedups })
+            Python::attach(|py| {
+                let ctx = Bound::new(
+                    py,
+                    Ctx {
+                        emitter,
+                        aggregators,
+                        dedups,
+                    },
+                )
+                .map_err(|e| e.to_string())?;
+                process
+                    .bind(py)
+                    .call1((task.bind(py), ctx))
                     .map_err(|e| e.to_string())?;
-                process.bind(py).call1((task.bind(py), ctx)).map_err(|e| e.to_string())?;
                 Ok(())
             })
         })
@@ -111,7 +126,10 @@ impl Ctx {
     /// seen, `False` after. Serialized by the GIL, so it is atomic across workers.
     fn first_seen(&self, py: Python<'_>, marker: Py<PyAny>, key: Py<PyAny>) -> PyResult<bool> {
         let seen = self.dedups.bind(py).get_item(marker)?;
-        if seen.call_method1("__contains__", (key.bind(py),))?.extract::<bool>()? {
+        if seen
+            .call_method1("__contains__", (key.bind(py),))?
+            .extract::<bool>()?
+        {
             return Ok(false);
         }
         seen.call_method1("add", (key,))?;
@@ -190,7 +208,11 @@ impl Engine {
     fn seed(&mut self, py: Python<'_>, task: Py<PyAny>) -> PyResult<()> {
         let ty = task.bind(py).get_type();
         let (key, name) = class_key_name(ty.as_any())?;
-        self.seeds.push(Seed { key, type_name: intern(key, &name), payload: task });
+        self.seeds.push(Seed {
+            key,
+            type_name: intern(key, &name),
+            payload: task,
+        });
         Ok(())
     }
 
@@ -203,7 +225,11 @@ impl Engine {
         live: bool,
     ) -> PyResult<Py<PyAny>> {
         let mut retry = RetryPolicy::new().max_attempts(self.max_attempts);
-        retry = if self.avoid_failed { retry.avoid_failed() } else { retry.any_instance() };
+        retry = if self.avoid_failed {
+            retry.avoid_failed()
+        } else {
+            retry.any_instance()
+        };
         if self.backoff_ms > 0 {
             retry = retry.backoff(Backoff::Fixed(Duration::from_millis(self.backoff_ms)));
         }
@@ -241,7 +267,7 @@ impl Engine {
             .build()
             .map_err(|e| PyRuntimeError::new_err(format!("tokio runtime: {e}")))?;
         let report = py
-            .allow_threads(|| runtime.block_on(engine.run()))
+            .detach(|| runtime.block_on(engine.run()))
             .map_err(|e| PyRuntimeError::new_err(format!("{e}")))?;
 
         let dict = PyDict::new(py);

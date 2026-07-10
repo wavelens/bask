@@ -14,6 +14,7 @@ use bask::prelude::*;
 struct Link {
     url: String,
 }
+
 struct Fetch {
     url: String,
 }
@@ -31,8 +32,12 @@ impl Worker for Dedupe {
     type Task = Link;
     async fn process(&self, link: &Link, ctx: &Context) -> anyhow::Result<()> {
         if ctx.first_seen::<SeenUrls>(link.url.clone()) {
-            ctx.emit(Fetch { url: link.url.clone() }).await?;
+            ctx.emit(Fetch {
+                url: link.url.clone(),
+            })
+            .await?;
         }
+
         Ok(())
     }
 }
@@ -46,9 +51,14 @@ struct Proxy {
 impl Worker for Proxy {
     type Task = Fetch;
     async fn process(&self, fetch: &Fetch, ctx: &Context) -> anyhow::Result<()> {
-        if self.blocks.iter().any(|suffix| fetch.url.ends_with(*suffix)) {
+        if self
+            .blocks
+            .iter()
+            .any(|suffix| fetch.url.ends_with(*suffix))
+        {
             anyhow::bail!("{} cannot reach {}", self.name, fetch.url);
         }
+
         ctx.aggregate::<Served>((fetch.url.clone(), self.name.to_string()));
         Ok(())
     }
@@ -83,26 +93,52 @@ async fn main() -> anyhow::Result<()> {
     let links = ["a.com", "b.ru", "a.com", "c.cn", "d.onion", "b.ru"];
     let mut builder = Engine::builder()
         .worker(Dedupe)
-        .worker_cfg(Proxy { name: "eu", blocks: &[".ru", ".onion"] }, WorkerCfg::new().label("eu"))
-        .worker_cfg(Proxy { name: "us", blocks: &[".cn", ".onion"] }, WorkerCfg::new().label("us"))
+        .worker_cfg(
+            Proxy {
+                name: "eu",
+                blocks: &[".ru", ".onion"],
+            },
+            WorkerCfg::new().label("eu"),
+        )
+        .worker_cfg(
+            Proxy {
+                name: "us",
+                blocks: &[".cn", ".onion"],
+            },
+            WorkerCfg::new().label("us"),
+        )
         .aggregator::<Served>()
         .dedup::<SeenUrls>()
-        .retry(RetryPolicy::new().max_attempts(3).avoid_failed().backoff(backoff))
+        .retry(
+            RetryPolicy::new()
+                .max_attempts(3)
+                .avoid_failed()
+                .backoff(backoff),
+        )
         .concurrency(1);
+
     for url in links {
-        builder = builder.seed(Link { url: url.to_string() });
+        builder = builder.seed(Link {
+            url: url.to_string(),
+        });
     }
     let report = builder.run().await?;
 
-    println!("seeded {} links, {} unique urls", links.len(), report.unique::<SeenUrls>());
+    println!(
+        "seeded {} links, {} unique urls",
+        links.len(),
+        report.unique::<SeenUrls>()
+    );
     println!("served:");
     for (url, proxy) in report.output::<Served>().unwrap() {
         println!("  {url:8} via {proxy}");
     }
+
     println!("\nfailed:");
     for failure in &report.failures {
         println!("  after {} attempts: {}", failure.attempts, failure.error);
     }
+
     println!("\nstats: {:?}", report.stats);
     Ok(())
 }

@@ -73,7 +73,8 @@ where
                 collected.push(batch);
             } else {
                 collected.push(batch.slice(0, need));
-                self.buffer.insert(0, batch.slice(need, batch.num_rows() - need));
+                self.buffer
+                    .insert(0, batch.slice(need, batch.num_rows() - need));
                 taken += need;
             }
         }

@@ -26,7 +26,11 @@ pub(crate) struct DedupSet<D: Dedup> {
 
 impl<D: Dedup> DedupSet<D> {
     fn new(shards: usize) -> Self {
-        DedupSet { shards: (0..shards.max(1)).map(|_| Mutex::new(HashSet::new())).collect() }
+        DedupSet {
+            shards: (0..shards.max(1))
+                .map(|_| Mutex::new(HashSet::new()))
+                .collect(),
+        }
     }
     fn first_seen(&self, key: D::Key) -> bool {
         let mut hasher = DefaultHasher::new();
@@ -60,14 +64,17 @@ pub(crate) struct Dedups {
 
 impl Dedups {
     pub fn insert<D: Dedup>(&mut self, shards: usize) {
-        self.map.insert(TypeId::of::<D>(), Arc::new(DedupSet::<D>::new(shards)));
+        self.map
+            .insert(TypeId::of::<D>(), Arc::new(DedupSet::<D>::new(shards)));
     }
 
     pub fn first_seen<D: Dedup>(&self, key: D::Key) -> bool {
         match self.map.get(&TypeId::of::<D>()) {
-            Some(set) => {
-                set.as_any().downcast_ref::<DedupSet<D>>().expect("dedup type").first_seen(key)
-            }
+            Some(set) => set
+                .as_any()
+                .downcast_ref::<DedupSet<D>>()
+                .expect("dedup type")
+                .first_seen(key),
             None => panic!("dedup {} not registered", std::any::type_name::<D>()),
         }
     }

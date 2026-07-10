@@ -18,6 +18,7 @@ struct Page {
     id: u32,
     depth: u32,
 }
+
 struct Render;
 
 struct Crawler;
@@ -30,7 +31,11 @@ impl Worker for Crawler {
         if page.depth < MAX_DEPTH {
             for i in 0..FANOUT {
                 let id = page.id.wrapping_mul(FANOUT).wrapping_add(i);
-                ctx.emit(Page { id, depth: page.depth + 1 }).await?;
+                ctx.emit(Page {
+                    id,
+                    depth: page.depth + 1,
+                })
+                .await?;
             }
         }
         Ok(())
@@ -56,9 +61,11 @@ impl Aggregator for Rendered {
     fn fold(state: &mut u64, input: u64) {
         *state += input;
     }
+
     fn merge(left: &mut u64, right: u64) {
         *left += right;
     }
+
     fn finalize(state: u64) -> u64 {
         state
     }
