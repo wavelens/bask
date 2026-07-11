@@ -229,6 +229,45 @@ engine.run()
 `engine.row_batch(key, group_cls, rows)` registers the row-count aggregator the same way:
 feed it with `ctx.route(key, batch)` and it emits `group_cls(batch)` per group.
 
+## Checkpoints
+
+Durability is opt-in and defined on the task: mark a type a checkpoint and it becomes a
+restore point. On arrival its payload is materialized to a store (default `bask.sqlite`,
+created lazily) and the source rows it covers are recorded, so a re-run skips finished
+items, prunes a fully-covered source (no re-read), and reseeds anything not yet consumed.
+A pipeline with no checkpoint type is byte-for-byte the in-memory engine.
+
+```rust
+use bask::prelude::*;
+use bask::Checkpoint;
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize, Checkpoint)]  // `#[checkpoint(key_only)]` stores just the key
+struct Saved { #[key] id: String, body: String }
+
+Engine::builder()
+    .worker(Fetch)
+    .source("feed", Feed)               // its rows are stamped with ctx.emit_keyed(ordinal, ..)
+    .run()                              // .store(..) optional; defaults to ./bask.sqlite
+    .await?;
+```
+
+Provenance rides the data: a source stamps each row, workers inherit their parent's rows,
+and routers union the rows folded since their last emit, so a checkpoint traces back to
+exactly the source rows it covers. From Python, subclass `bask.tasks.Checkpoint`:
+
+```python
+from bask import Engine
+from bask.tasks import Checkpoint
+
+class Saved(Checkpoint):
+    def __init__(self, id, body): self.id, self.body = id, body
+    def key(self): return str(self.id)
+
+engine = Engine(store="bask.sqlite")     # default when a checkpoint participates
+engine.source(Feed(), "feed")            # a source worker calls ctx.emit_keyed(ordinal, task)
+```
+
 ## Crates
 
 You depend only on `bask`; it re-exports the engine at the crate root and the rest behind
@@ -237,6 +276,7 @@ features. The internals are separate crates so the engine stays dependency-light
 | crate          | contents                                          | reached via                     |
 |----------------|---------------------------------------------------|---------------------------------|
 | `bask-core`    | engine: workers, routers, scheduler, retry        | `bask` root and `bask::prelude` |
+| `bask-macros`  | `#[derive(Checkpoint)]`                            | `bask::Checkpoint`              |
 | `bask-io`      | pluggable source/sink IO plane                    | `bask::io` (feature `io`)       |
 | `bask-formats` | Arrow/Parquet/CSV/JSONL and record IO             | `bask::formats` (feature `formats`) |
 | `bask-tasks`   | predefined workers and routers (chunk, row-batch) | `bask::tasks` (feature `formats`) |
