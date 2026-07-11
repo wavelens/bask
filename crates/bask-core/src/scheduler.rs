@@ -152,6 +152,24 @@ impl Emitter {
         self.enqueue(key, type_name, payload, self.keys.clone())
     }
 
+    /// The source coverage of the task currently being processed, so a dynamic router
+    /// (e.g. the Python `RowBatch`) can union it across the inputs folded into a group.
+    pub fn coverage(&self) -> Coverage {
+        self.keys.clone()
+    }
+
+    /// Enqueue a dynamic task carrying an explicit `coverage` instead of inheriting the
+    /// current task's; used to stamp a router-batched group with the union of its inputs.
+    pub fn emit_covered_dyn(
+        &self,
+        key: u64,
+        type_name: &'static str,
+        payload: Box<dyn std::any::Any + Send + Sync>,
+        coverage: Coverage,
+    ) -> crate::Result<()> {
+        self.enqueue(key, type_name, payload, coverage)
+    }
+
     /// Enqueue a dynamic task stamped with an explicit source `key`; a dynamic source
     /// (e.g. a Python reader) calls this per row so a checkpoint traces back to it.
     pub fn emit_keyed_dyn(

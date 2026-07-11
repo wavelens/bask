@@ -19,8 +19,8 @@ use pyo3::types::{PyBytes, PyDict, PyList};
 use arrow::pyarrow::{FromPyArrow, ToPyArrow};
 use arrow::record_batch::RecordBatch;
 use bask_core::{
-    Backoff, Cancellation, CheckpointOps, Context, DeadLetter, DeadLetterSink, DynWorker, Emitter,
-    LiveConsole, RetryExt, RetryOn, RetryPolicy, Shutdown, SqliteStore, WorkerCfg,
+    Backoff, Cancellation, CheckpointOps, Context, Coverage, DeadLetter, DeadLetterSink, DynWorker,
+    Emitter, LiveConsole, RetryExt, RetryOn, RetryPolicy, Shutdown, SqliteStore, WorkerCfg,
 };
 
 /// A retry hint a Python worker attaches to its exception via `_bask_retry`, mapped onto
@@ -293,39 +293,86 @@ impl DynWorker for ChunkerBridge {
     }
 }
 
-/// A pyarrow view of the Rust row-count aggregator, driven by the `bask.tasks.RowBatch`
-/// router: push batches, get full groups back, and flush the remainder at end-of-run.
+/// A pyarrow view of the Rust row-count aggregator, driving the `bask.tasks.RowBatch`
+/// router: it wraps each full group in `group_cls` and emits it onto the router's `out`,
+/// carrying the union of the source rows folded since its last emit so a group-derived
+/// checkpoint traces back to exactly the rows it covers (mirroring the Rust routers).
 #[pyclass]
 struct RowAggregator {
     inner: bask_tasks::RowAggregator,
+    group_cls: Py<PyAny>,
+    group_key: u64,
+    group_type: &'static str,
+    pending: Coverage,
+    groups: usize,
+}
+
+impl RowAggregator {
+    /// Wrap each ready group in `group_cls` and buffer it on `out` with the accumulated
+    /// coverage, then reset it, so every input folded since the last emit is attributed.
+    fn drain(
+        &mut self,
+        py: Python<'_>,
+        out: &Bound<'_, RouterOut>,
+        groups: Vec<RecordBatch>,
+    ) -> PyResult<()> {
+        if groups.is_empty() {
+            return Ok(());
+        }
+        let coverage = std::mem::take(&mut self.pending);
+        let mut sink = out.borrow_mut();
+        for batch in groups {
+            let task = self
+                .group_cls
+                .bind(py)
+                .call1((batch.to_pyarrow(py)?,))?
+                .unbind();
+            sink.buffer
+                .push((self.group_key, self.group_type, task, coverage.clone()));
+            self.groups += 1;
+        }
+        Ok(())
+    }
 }
 
 #[pymethods]
 impl RowAggregator {
     #[new]
-    fn new(rows: usize) -> Self {
-        RowAggregator {
+    fn new(py: Python<'_>, rows: usize, group_cls: Py<PyAny>) -> PyResult<Self> {
+        let (group_key, group_name) = class_key_name(group_cls.bind(py))?;
+        Ok(RowAggregator {
             inner: bask_tasks::RowAggregator::new(rows),
-        }
+            group_key,
+            group_type: intern(group_key, &group_name),
+            group_cls,
+            pending: Coverage::empty(),
+            groups: 0,
+        })
     }
 
-    /// Push a pyarrow RecordBatch; returns any full group(s) ready to emit.
-    fn push(&mut self, py: Python<'_>, batch: &Bound<'_, PyAny>) -> PyResult<Vec<Py<PyAny>>> {
+    /// Fold one input (a pyarrow RecordBatch and the router's `out`) into the aggregate,
+    /// emitting any full groups onto `out`. The input's coverage rides on `out`.
+    fn push(
+        &mut self,
+        py: Python<'_>,
+        out: &Bound<'_, RouterOut>,
+        batch: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        self.pending.union_with(&out.borrow().coverage);
         let batch = RecordBatch::from_pyarrow_bound(batch)?;
-        self.inner
-            .push(batch)
-            .into_iter()
-            .map(|b| b.to_pyarrow(py).map(|o| o.unbind()))
-            .collect()
+        let groups = self.inner.push(batch);
+        self.drain(py, out, groups)
     }
 
-    /// Drain the buffered rows into a final group at end-of-run.
-    fn flush(&mut self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
-        self.inner
-            .flush()
-            .into_iter()
-            .map(|b| b.to_pyarrow(py).map(|o| o.unbind()))
-            .collect()
+    /// Emit the buffered remainder as a final group onto `out` at end-of-run.
+    fn flush(&mut self, py: Python<'_>, out: &Bound<'_, RouterOut>) -> PyResult<()> {
+        let groups = self.inner.flush();
+        self.drain(py, out, groups)
+    }
+
+    /// The number of groups emitted so far (the router's terminal output).
+    fn groups(&self) -> usize {
+        self.groups
     }
 }
 
@@ -373,13 +420,19 @@ impl Ctx {
     /// enqueued here under the same backpressure as `emit`.
     fn route(&self, py: Python<'_>, router_cls: Py<PyAny>, value: Py<PyAny>) -> PyResult<()> {
         let router = self.routers.bind(py).get_item(router_cls)?;
-        let out = Bound::new(py, RouterOut { buffer: Vec::new() })?;
+        let out = Bound::new(
+            py,
+            RouterOut {
+                buffer: Vec::new(),
+                coverage: self.emitter.coverage(),
+            },
+        )?;
         router.call_method1("route", (value, &out))?;
         let buffered = std::mem::take(&mut out.borrow_mut().buffer);
         py.detach(|| {
-            for (key, type_name, payload) in buffered {
+            for (key, type_name, payload, coverage) in buffered {
                 self.emitter
-                    .emit_dyn(key, type_name, Box::new(payload))
+                    .emit_covered_dyn(key, type_name, Box::new(payload), coverage)
                     .map_err(|_| PyRuntimeError::new_err("engine stopped"))?;
             }
             Ok(())
@@ -407,10 +460,13 @@ impl Ctx {
     }
 }
 
-/// The emit handle a Python router receives as `out`; buffers tasks routed by class.
+/// The emit handle a Python router receives as `out`; buffers tasks routed by class, each
+/// tagged with the coverage to stamp on it. `coverage` is the folding input's rows, which
+/// a plain `emit` inherits and the aggregator unions into a group.
 #[pyclass]
 struct RouterOut {
-    buffer: Vec<(u64, &'static str, Py<PyAny>)>,
+    buffer: Vec<(u64, &'static str, Py<PyAny>, Coverage)>,
+    coverage: Coverage,
 }
 
 #[pymethods]
@@ -419,7 +475,8 @@ impl RouterOut {
     fn emit(&mut self, py: Python<'_>, task: Py<PyAny>) -> PyResult<()> {
         let ty = task.bind(py).get_type();
         let (key, name) = class_key_name(ty.as_any())?;
-        self.buffer.push((key, intern(key, &name), task));
+        let coverage = self.coverage.clone();
+        self.buffer.push((key, intern(key, &name), task, coverage));
         Ok(())
     }
 }
@@ -781,15 +838,19 @@ impl Engine {
                     if !router.hasattr("flush").unwrap_or(false) {
                         continue;
                     }
-                    let Ok(collected) = Bound::new(py, RouterOut { buffer: Vec::new() }) else {
+                    let collected = RouterOut {
+                        buffer: Vec::new(),
+                        coverage: Coverage::empty(),
+                    };
+                    let Ok(collected) = Bound::new(py, collected) else {
                         continue;
                     };
                     if router.call_method1("flush", (&collected,)).is_err() {
                         continue;
                     }
                     let buffered = std::mem::take(&mut collected.borrow_mut().buffer);
-                    for (key, type_name, payload) in buffered {
-                        out.emit_dyn(key, type_name, Box::new(payload));
+                    for (key, type_name, payload, coverage) in buffered {
+                        out.emit_dyn_covered(key, type_name, Box::new(payload), coverage);
                     }
                 }
             });

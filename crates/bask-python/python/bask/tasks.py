@@ -72,22 +72,18 @@ class RowBatch:
     """A router that re-aggregates pyarrow batches into groups of at least `rows` rows,
     reusing the Rust `bask_tasks` aggregator. Register it with
     `engine.row_batch(key, group_cls, rows)` and feed it with `ctx.route(key, batch)`; it
-    emits `group_cls(batch)` per full group and flushes the remainder at end-of-run."""
+    emits `group_cls(batch)` per full group and flushes the remainder at end-of-run. Each
+    group carries the union of the source rows folded into it, so a group-derived
+    checkpoint traces back to exactly the rows it covers."""
 
     def __init__(self, group_cls: type, rows: int):
-        self._agg = _bask.RowAggregator(rows)
-        self._group_cls = group_cls
-        self._groups = 0
+        self._agg = _bask.RowAggregator(rows, group_cls)
 
     def route(self, value: Any, out: Any) -> None:
-        for group in self._agg.push(getattr(value, "batch", value)):
-            out.emit(self._group_cls(group))
-            self._groups += 1
+        self._agg.push(out, getattr(value, "batch", value))
 
     def flush(self, out: Any) -> None:
-        for group in self._agg.flush():
-            out.emit(self._group_cls(group))
-            self._groups += 1
+        self._agg.flush(out)
 
     def finalize(self) -> int:
-        return self._groups
+        return self._agg.groups()

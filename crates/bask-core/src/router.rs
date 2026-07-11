@@ -48,6 +48,20 @@ impl Emit {
             .push(Envelope::new_dyn(key, type_name, payload));
     }
 
+    /// Emit a dynamically-typed task carrying explicit `coverage`; a dynamic router flushes
+    /// its trailing batch here with the union of the rows folded into it.
+    pub fn emit_dyn_covered(
+        &mut self,
+        key: u64,
+        type_name: &'static str,
+        payload: Box<dyn std::any::Any + Send + Sync>,
+        coverage: Coverage,
+    ) {
+        let mut env = Envelope::new_dyn(key, type_name, payload);
+        env.keys = coverage;
+        self.envelopes.push(env);
+    }
+
     pub fn is_empty(&self) -> bool {
         self.envelopes.is_empty()
     }
