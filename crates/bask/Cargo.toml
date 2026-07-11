@@ -15,11 +15,13 @@ bask-core.workspace = true
 bask-io = { workspace = true, optional = true }
 bask-formats = { workspace = true, optional = true }
 bask-tasks = { workspace = true, optional = true }
+anyhow = { version = "1", optional = true }
 
 [features]
 io = ["dep:bask-io"]
 formats = ["io", "dep:bask-formats", "dep:bask-tasks"]
 dataset = ["io", "bask-io/dataset"]
+cli = ["dataset", "bask-core/cli", "dep:anyhow"]
 download = ["io", "bask-io/download"]
 object-store = ["io", "bask-io/object-store"]
 postgres = ["formats", "bask-formats/postgres"]
@@ -37,6 +39,10 @@ rusqlite = { version = "0.39", features = ["bundled"] }
 [[example]]
 name = "dataset"
 required-features = ["dataset"]
+
+[[example]]
+name = "cli"
+required-features = ["cli"]
 
 [[example]]
 name = "streaming"

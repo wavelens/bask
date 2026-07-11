@@ -560,6 +560,11 @@ fn prepare_seeds(
         let Some(group) = registry.groups.get(route_key) else {
             continue;
         };
+        // A selected checkpoint is terminal, so replaying it would only stop again; leave
+        // it materialized and reseed the unselected feeders that carry work toward it.
+        if d.is_terminal(ops.name()) {
+            continue;
+        }
         for item in d.stored_items(ops.name()).map_err(crate::Error::Store)? {
             if let Ok(payload) = ops.decode(&item.payload) {
                 let mut env = Envelope::reseed(*route_key, group.worker_type, payload);

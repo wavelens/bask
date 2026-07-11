@@ -35,30 +35,32 @@ impl LiveConsole {
         }
     }
 
+    /// Force appended frames instead of the in-place rewrite, for `--no-live` and pipes.
+    pub fn plain() -> Self {
+        Self {
+            last_lines: 0,
+            tty: false,
+            start: None,
+        }
+    }
+
     fn frame(&mut self, s: &Snapshot) -> Vec<String> {
         let elapsed = self.start.get_or_insert_with(Instant::now).elapsed();
-        let mut lines = vec![
-            format!(
-                "bask · {:>5.1}s · in-flight {} · queue {} · processed {} · retried {} · failed {}",
-                elapsed.as_secs_f64(),
-                s.in_flight,
-                s.queued,
-                s.processed,
-                s.retried,
-                s.failed
-            ),
-            format!(
-                "  {:<16}{:>9}{:>9}{:>9}",
-                "worker", "active", "queued", "done"
-            ),
-        ];
+        let mut lines = vec![format!(
+            "bask · {:>5.1}s · in-flight {} · processed {} · retried {} · failed {}",
+            elapsed.as_secs_f64(),
+            s.in_flight,
+            s.processed,
+            s.retried,
+            s.failed
+        )];
         for w in &s.workers {
             lines.push(format!(
-                "  {:<16}{:>9}{:>9}{:>9}",
-                short(w.worker_type),
-                format!("{}/{}", w.active, w.capacity),
+                "  [{:>3}/{}/{}] {}",
+                w.active,
                 w.queued,
-                w.processed
+                w.processed,
+                short(w.worker_type)
             ));
         }
         lines
@@ -96,6 +98,44 @@ impl Monitor for LiveConsole {
         if self.tty {
             println!();
         }
+    }
+}
+
+/// Emits each sampled [`Snapshot`] as one line of JSON (newline-delimited) on stdout, for a
+/// UI or log pipeline to consume; the `--json` counterpart of [`LiveConsole`].
+#[derive(Default)]
+pub struct JsonConsole;
+
+impl JsonConsole {
+    pub fn new() -> Self {
+        JsonConsole
+    }
+}
+
+impl Monitor for JsonConsole {
+    fn sample(&mut self, s: &Snapshot) {
+        let workers: Vec<String> = s
+            .workers
+            .iter()
+            .map(|w| {
+                format!(
+                    "{{\"type\":{:?},\"active\":{},\"queued\":{},\"processed\":{}}}",
+                    short(w.worker_type),
+                    w.active,
+                    w.queued,
+                    w.processed
+                )
+            })
+            .collect();
+        println!(
+            "{{\"in_flight\":{},\"queued\":{},\"processed\":{},\"retried\":{},\"failed\":{},\"workers\":[{}]}}",
+            s.in_flight,
+            s.queued,
+            s.processed,
+            s.retried,
+            s.failed,
+            workers.join(",")
+        );
     }
 }
 
