@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc};
 
+use crate::checkpoint::{Admit, Coverage, Durability};
 use crate::context::Context;
 use crate::deadletter::{DeadLetter, DeadLetterSink};
 use crate::dedup::Dedups;
@@ -79,7 +80,9 @@ impl Queue {
         }
     }
 
-    /// Blocking enqueue for synchronous front-ends running off the async threads.
+    /// Blocking enqueue for synchronous front-ends running off the async threads. The
+    /// unsent envelope is handed back on failure, so it is returned by value.
+    #[allow(clippy::result_large_err)]
     pub(crate) fn blocking_send(&self, env: Envelope) -> Result<(), Envelope> {
         let key = env.key;
         match self.tx.blocking_send(env) {
@@ -130,23 +133,52 @@ pub struct Emitter {
     queue: Queue,
     in_flight: Arc<InFlight>,
     run: Arc<RunSlot>,
+    keys: Coverage,
+    source: Option<Arc<str>>,
+    durability: Option<Arc<Durability>>,
 }
 
 impl Emitter {
-    /// Enqueue a dynamic task. On a full queue this yields the caller's run permit
-    /// and blocks the (off-runtime) calling thread until capacity frees; the GIL
-    /// bounds concurrency on resume, so it does not reacquire.
+    /// Enqueue a dynamic task, inheriting the current task's source coverage. On a full
+    /// queue this yields the caller's run permit and blocks the (off-runtime) calling
+    /// thread until capacity frees; the GIL bounds concurrency on resume, so it does not
+    /// reacquire.
     pub fn emit_dyn(
         &self,
         key: u64,
         type_name: &'static str,
         payload: Box<dyn std::any::Any + Send + Sync>,
     ) -> crate::Result<()> {
+        self.enqueue(key, type_name, payload, self.keys.clone())
+    }
+
+    /// Enqueue a dynamic task stamped with an explicit source `key`; a dynamic source
+    /// (e.g. a Python reader) calls this per row so a checkpoint traces back to it.
+    pub fn emit_keyed_dyn(
+        &self,
+        source_key: u64,
+        key: u64,
+        type_name: &'static str,
+        payload: Box<dyn std::any::Any + Send + Sync>,
+    ) -> crate::Result<()> {
+        if let (Some(durability), Some(source)) = (&self.durability, &self.source) {
+            durability.observe(source, source_key);
+        }
+        self.enqueue(key, type_name, payload, Coverage::single(source_key))
+    }
+
+    fn enqueue(
+        &self,
+        key: u64,
+        type_name: &'static str,
+        payload: Box<dyn std::any::Any + Send + Sync>,
+        keys: Coverage,
+    ) -> crate::Result<()> {
         self.in_flight.inc();
-        match self
-            .queue
-            .try_send(Envelope::new_dyn(key, type_name, payload))
-        {
+        let mut env = Envelope::new_dyn(key, type_name, payload);
+        env.keys = keys;
+        env.source = self.source.clone();
+        match self.queue.try_send(env) {
             Sent::Ok => Ok(()),
             Sent::Full(env) => {
                 self.run.release();
@@ -173,6 +205,9 @@ impl crate::context::Context {
             queue: self.queue.clone(),
             in_flight: self.in_flight.clone(),
             run: self.run.clone(),
+            keys: self.keys.clone(),
+            source: self.source.clone(),
+            durability: self.durability.clone(),
         }
     }
 }
@@ -241,12 +276,20 @@ pub(crate) async fn run(
     sample_interval: Duration,
     mut flush_hook: Option<FlushHook>,
     dead_letter: Option<Arc<dyn DeadLetterSink>>,
+    durability: Option<Arc<Durability>>,
 ) -> crate::Result<RunReport> {
     for group in registry.groups.values() {
         for inst in &group.instances {
             inst.worker.on_start().await.map_err(crate::Error::Worker)?;
         }
     }
+
+    // Resume: drop seeds whose rows the store already covers, then replay any stored
+    // checkpoint item whose type now has a worker (the "process later" step).
+    let seeds = match &durability {
+        None => seeds,
+        Some(d) => prepare_seeds(d, &registry, seeds)?,
+    };
 
     let in_flight = Arc::new(InFlight::new());
     let sem = Arc::new(Semaphore::new(concurrency));
@@ -336,6 +379,7 @@ pub(crate) async fn run(
                         failures: failures.clone(),
                         cancel: cancel.clone(),
                         unfinished: unfinished.clone(),
+                        durability: durability.clone(),
                     });
                 }
                 _ = in_flight.wait_idle() => {}
@@ -428,6 +472,16 @@ pub(crate) async fn run(
         }
     }
 
+    // A source that finished a clean pass records its extent, so the next run knows the
+    // pass is fully covered and skips re-reading it. An interrupted or failed pass does
+    // not, so it re-reads and resumes.
+    if let Some(d) = &durability
+        && !interrupted
+        && stats.failed.load(SeqCst) == 0
+    {
+        d.record_extents().map_err(crate::Error::Store)?;
+    }
+
     let outputs = routers.finalize_all();
     let unique = dedups.sizes();
     let failures = std::mem::take(&mut *failures.lock().unwrap());
@@ -451,6 +505,52 @@ pub(crate) async fn run(
     }
 
     Ok(report)
+}
+
+/// Resume preprocessing: assign source ordinals to seeds, drop those the store already
+/// covers (a fully-covered source is skipped whole), then replay stored checkpoint items
+/// whose type now has a worker registered.
+fn prepare_seeds(
+    d: &Arc<Durability>,
+    registry: &Registry,
+    seeds: Vec<Envelope>,
+) -> crate::Result<Vec<Envelope>> {
+    let covered = d.covered().map_err(crate::Error::Store)?;
+    let extents = d.extents().map_err(crate::Error::Store)?;
+    let mut kept = Vec::with_capacity(seeds.len());
+    for (i, mut env) in seeds.into_iter().enumerate() {
+        match &env.source {
+            Some(source) => {
+                let done = extents
+                    .get(source.as_ref())
+                    .is_some_and(|extent| !extent.is_empty() && extent.is_subset_of(&covered));
+                if !done {
+                    kept.push(env);
+                }
+            }
+            None => {
+                if env.keys.is_empty() {
+                    env.keys = Coverage::single(i as u64);
+                }
+                if !env.keys.is_subset_of(&covered) {
+                    kept.push(env);
+                }
+            }
+        }
+    }
+    for (route_key, ops) in d.checkpoints.iter() {
+        let Some(group) = registry.groups.get(route_key) else {
+            continue;
+        };
+        for item in d.stored_items(ops.name()).map_err(crate::Error::Store)? {
+            if let Ok(payload) = ops.decode(&item.payload) {
+                let mut env = Envelope::reseed(*route_key, group.worker_type, payload);
+                env.keys = item.coverage;
+                kept.push(env);
+            }
+        }
+    }
+    Ok(kept)
 }
 
 fn snapshot(registry: &Registry, in_flight: usize, queued: usize, stats: &AtomicStats) -> Snapshot {
@@ -493,6 +593,7 @@ struct Dispatch {
     failures: Arc<Mutex<Vec<TaskFailure>>>,
     cancel: Cancel,
     unfinished: Arc<AtomicUsize>,
+    durability: Option<Arc<Durability>>,
 }
 
 fn dispatch(d: Dispatch) {
@@ -513,6 +614,7 @@ fn dispatch(d: Dispatch) {
             failures,
             cancel,
             unfinished,
+            durability,
         } = d;
 
         // Record a terminal failure and hand the type-erased payload to the dead-letter
@@ -540,6 +642,36 @@ fn dispatch(d: Dispatch) {
             }
             in_flight.dec();
         };
+
+        // Checkpoint admission: skip an item already in the store, materialize a new one,
+        // and decide whether a worker still runs. A terminal checkpoint (no worker) is
+        // materialized here and never reaches the "no worker registered" failure below.
+        let mut consume: Option<(String, String)> = None;
+        if let Some(d) = &durability
+            && let Some(ops) = d.checkpoints.get(&env.key)
+        {
+            let has_worker = registry.groups.contains_key(&env.key);
+            let key = ops.key(env.payload.as_ref());
+            match d.admit(ops, &key, env.payload.as_ref(), &env.keys, has_worker) {
+                Ok(Admit::Finished { skipped }) => {
+                    drop(permit);
+                    if skipped {
+                        stats.skipped.fetch_add(1, SeqCst);
+                    } else {
+                        stats.processed.fetch_add(1, SeqCst);
+                    }
+                    in_flight.dec();
+                    return;
+                }
+                Ok(Admit::RunWorker) => consume = Some((ops.name().to_string(), key)),
+                Err(err) => {
+                    drop(permit);
+                    let (type_name, attempts) = (env.type_name, env.attempt + 1);
+                    fail(type_name, env.payload, attempts, format!("{err:#}"), None);
+                    return;
+                }
+            }
+        }
 
         let Some(group) = registry.groups.get(&env.key) else {
             drop(permit);
@@ -608,6 +740,9 @@ fn dispatch(d: Dispatch) {
             shard,
             run: run.clone(),
             cancel: cancel.clone(),
+            keys: env.keys.clone(),
+            source: env.source.clone(),
+            durability: durability.clone(),
         };
         let outcome = match inst.timeout {
             Some(dur) => tokio::select! {
@@ -629,6 +764,9 @@ fn dispatch(d: Dispatch) {
 
         let res = match outcome {
             Outcome::Cancelled => {
+                if let (Some(d), Some((name, key))) = (&durability, &consume) {
+                    d.release(name, key);
+                }
                 unfinished.fetch_add(1, SeqCst);
                 in_flight.dec();
                 return;
@@ -639,9 +777,15 @@ fn dispatch(d: Dispatch) {
             Ok(()) => {
                 stats.processed.fetch_add(1, SeqCst);
                 group.processed.fetch_add(1, SeqCst);
+                if let (Some(d), Some((name, key))) = (&durability, &consume) {
+                    let _ = d.consume(name, key);
+                }
                 in_flight.dec();
             }
             Err(err) => {
+                if let (Some(d), Some((name, key))) = (&durability, &consume) {
+                    d.release(name, key);
+                }
                 let next = env.attempt + 1;
                 match policy.decide(next, &err) {
                     Decision::Retry { select, delay } => {

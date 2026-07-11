@@ -16,6 +16,7 @@ pub(crate) struct AtomicStats {
     pub processed: AtomicU64,
     pub retried: AtomicU64,
     pub failed: AtomicU64,
+    pub skipped: AtomicU64,
 }
 
 impl AtomicStats {
@@ -24,6 +25,7 @@ impl AtomicStats {
             processed: self.processed.load(SeqCst),
             retried: self.retried.load(SeqCst),
             failed: self.failed.load(SeqCst),
+            skipped: self.skipped.load(SeqCst),
         }
     }
 }
@@ -33,6 +35,8 @@ pub struct Stats {
     pub processed: u64,
     pub retried: u64,
     pub failed: u64,
+    /// Checkpoint hits already in the store, so the work was not redone.
+    pub skipped: u64,
 }
 
 #[derive(Debug, Clone)]

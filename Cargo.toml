@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/bask-core",
+    "crates/bask-macros",
     "crates/bask-io",
     "crates/bask-formats",
     "crates/bask-tasks",
@@ -18,6 +19,7 @@ repository = "https://github.com/wavelens/bask"
 
 [workspace.dependencies]
 bask-core = { path = "crates/bask-core", version = "0.1.1" }
+bask-macros = { path = "crates/bask-macros", version = "0.1.1" }
 bask-io = { path = "crates/bask-io", version = "0.1.1" }
 bask-formats = { path = "crates/bask-formats", version = "0.1.1" }
 bask-tasks = { path = "crates/bask-tasks", version = "0.1.1" }

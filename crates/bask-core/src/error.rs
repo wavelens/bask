@@ -12,4 +12,6 @@ pub enum Error {
     Stopped,
     #[error("worker lifecycle hook failed: {0}")]
     Worker(#[source] anyhow::Error),
+    #[error("checkpoint store failed: {0}")]
+    Store(#[source] anyhow::Error),
 }

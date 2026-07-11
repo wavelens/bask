@@ -15,6 +15,19 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 async-trait = "0.1"
 anyhow = "1"
 thiserror = "2"
+bask-macros = { workspace = true, optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+inventory = { version = "0.3", optional = true }
+rusqlite = { version = "0.39", features = ["bundled"], optional = true }
+blake3 = { version = "1", optional = true }
+
+[features]
+default = ["checkpoint"]
+checkpoint = ["dep:bask-macros", "dep:serde", "dep:serde_json", "dep:inventory", "dep:rusqlite", "dep:blake3"]
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }
 
 [package.metadata.docs.rs]
 all-features = true

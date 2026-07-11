@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+use crate::checkpoint::{Coverage, Durability};
 use crate::dedup::{Dedup, Dedups};
 use crate::interrupt::{Cancel, Cancellation};
 use crate::router::{Emit, Router, Routers};
@@ -21,6 +22,9 @@ pub struct Context {
     pub(crate) shard: usize,
     pub(crate) run: Arc<RunSlot>,
     pub(crate) cancel: Cancel,
+    pub(crate) keys: Coverage,
+    pub(crate) source: Option<Arc<str>>,
+    pub(crate) durability: Option<Arc<Durability>>,
 }
 
 impl Context {
@@ -28,7 +32,23 @@ impl Context {
     /// on a full queue the worker yields its run permit so the dispatcher can drain,
     /// then reacquires it before returning, which keeps memory bounded without deadlock.
     pub async fn emit<T: Task>(&self, task: T) -> crate::Result<()> {
-        self.emit_envelope(Envelope::new(task)).await
+        let mut env = Envelope::new(task);
+        env.keys = self.keys.clone();
+        env.source = self.source.clone();
+        self.emit_envelope(env).await
+    }
+
+    /// Emit a task, stamping it with an explicit source `key` instead of inheriting the
+    /// parent's coverage. A source (a CSV reader, a paginator) calls this per row so a
+    /// downstream checkpoint traces back to exactly the rows it covers.
+    pub async fn emit_keyed<T: Task>(&self, key: u64, task: T) -> crate::Result<()> {
+        if let (Some(durability), Some(source)) = (&self.durability, &self.source) {
+            durability.observe(source, key);
+        }
+        let mut env = Envelope::new(task);
+        env.keys = Coverage::single(key);
+        env.source = self.source.clone();
+        self.emit_envelope(env).await
     }
 
     async fn emit_envelope(&self, env: Envelope) -> crate::Result<()> {
@@ -58,8 +78,10 @@ impl Context {
     /// and may emit derived tasks, which are enqueued here under the same backpressure.
     pub async fn route<R: Router>(&self, input: R::Input) -> crate::Result<()> {
         let mut out = Emit::default();
-        self.routers.route::<R>(self.shard, input, &mut out);
-        for env in std::mem::take(&mut out.envelopes) {
+        self.routers
+            .route::<R>(self.shard, input, &self.keys, &mut out);
+        for mut env in std::mem::take(&mut out.envelopes) {
+            env.source = self.source.clone();
             self.emit_envelope(env).await?;
         }
         Ok(())
