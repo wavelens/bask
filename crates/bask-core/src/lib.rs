@@ -31,7 +31,9 @@ mod sqlite;
 mod task;
 mod worker;
 
-pub use checkpoint::{CheckpointOps, Committed, Coverage, MemStore, Status, Store, StoredItem};
+pub use checkpoint::{
+    CheckpointOps, Committed, Coverage, Dataset, MemStore, Status, Store, StoredItem,
+};
 pub use context::Context;
 pub use deadletter::{DeadLetter, DeadLetterSink};
 pub use dedup::Dedup;

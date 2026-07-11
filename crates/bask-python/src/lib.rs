@@ -19,9 +19,11 @@ use pyo3::types::{PyBytes, PyDict, PyList};
 use arrow::pyarrow::{FromPyArrow, ToPyArrow};
 use arrow::record_batch::RecordBatch;
 use bask_core::{
-    Backoff, Cancellation, CheckpointOps, Context, Coverage, DeadLetter, DeadLetterSink, DynWorker,
-    Emitter, LiveConsole, RetryExt, RetryOn, RetryPolicy, Shutdown, SqliteStore, WorkerCfg,
+    Backoff, Cancellation, CheckpointOps, Committed, Context, Coverage, Dataset, DeadLetter,
+    DeadLetterSink, DynWorker, Emitter, LiveConsole, RetryExt, RetryOn, RetryPolicy, Shutdown,
+    SqliteStore, Status, Store, StoredItem, WorkerCfg,
 };
+use bask_io::FileDataset;
 
 /// A retry hint a Python worker attaches to its exception via `_bask_retry`, mapped onto
 /// the Rust [`RetryOn`]. The predicate variant (`AnyWith`) is Rust-only.
@@ -161,6 +163,218 @@ impl CheckpointOps for PyCheckpoint {
         })
         .map_err(|e: PyErr| anyhow::anyhow!("checkpoint decode(): {e}"))
     }
+}
+
+/// The built-in directory-backed dataset exposed to Python: content-addressed Parquet
+/// shards over one `bask.sqlite`, self-compacting by coverage. `read()` yields the live
+/// shard payloads for the `bask.data.Dataset` wrapper to decode with pyarrow.
+#[pyclass(name = "FileDataset")]
+struct PyFileDataset {
+    inner: FileDataset,
+}
+
+#[pymethods]
+impl PyFileDataset {
+    #[new]
+    fn new(path: String) -> PyResult<Self> {
+        FileDataset::open(path)
+            .map(|inner| PyFileDataset { inner })
+            .map_err(|e| PyRuntimeError::new_err(format!("open dataset: {e}")))
+    }
+
+    fn read<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let shards = self
+            .inner
+            .read()
+            .map_err(|e| PyRuntimeError::new_err(format!("read dataset: {e}")))?;
+        let out = PyList::empty(py);
+        for shard in shards {
+            out.append(PyBytes::new(py, &shard.payload))?;
+        }
+        Ok(out)
+    }
+}
+
+/// A custom Python object driven as a [`Dataset`]: its `commit`/`put`/`read`/... methods are
+/// the durable backing, so a developer implements one protocol to target any database. Rows
+/// cross the boundary as `(key, payload, coverage_bytes)` tuples; coverage is opaque bytes
+/// (see `coverage_rows`). A shared lock serializes every call, so the Python object sees
+/// strictly one-at-a-time access (sqlite releases the GIL mid-call, and the engine's tail
+/// `consume` can overlap the next task's `commit`) and need not be thread-safe itself.
+#[derive(Clone)]
+struct PyDataset {
+    obj: Arc<Py<PyAny>>,
+    lock: Arc<Mutex<()>>,
+}
+
+impl PyDataset {
+    fn items(&self, method: &str, name: Option<&str>) -> anyhow::Result<Vec<StoredItem>> {
+        let _guard = self.lock.lock().unwrap();
+        Python::attach(|py| -> PyResult<Vec<StoredItem>> {
+            let bound = self.obj.bind(py);
+            let result = match name {
+                Some(name) => bound.call_method1(method, (name,))?,
+                None => bound.call_method0(method)?,
+            };
+            let mut out = Vec::new();
+            for row in result.try_iter()? {
+                let row = row?;
+                out.push(StoredItem {
+                    key: row.get_item(0)?.extract()?,
+                    payload: row.get_item(1)?.extract()?,
+                    coverage: Coverage::from_bytes(&row.get_item(2)?.extract::<Vec<u8>>()?),
+                });
+            }
+            Ok(out)
+        })
+        .map_err(|e: PyErr| anyhow::anyhow!("dataset.{method}(): {e}"))
+    }
+}
+
+impl Store for PyDataset {
+    fn statuses(&self) -> anyhow::Result<Vec<(String, String, Status)>> {
+        let _guard = self.lock.lock().unwrap();
+        Python::attach(|py| -> PyResult<Vec<(String, String, Status)>> {
+            let result = self.obj.bind(py).call_method0("statuses")?;
+            let mut out = Vec::new();
+            for row in result.try_iter()? {
+                let row = row?;
+                let status = if row.get_item(2)?.extract::<i64>()? == 1 {
+                    Status::Consumed
+                } else {
+                    Status::Stored
+                };
+                out.push((
+                    row.get_item(0)?.extract()?,
+                    row.get_item(1)?.extract()?,
+                    status,
+                ));
+            }
+            Ok(out)
+        })
+        .map_err(|e: PyErr| anyhow::anyhow!("dataset.statuses(): {e}"))
+    }
+
+    fn covered(&self) -> anyhow::Result<Coverage> {
+        let _guard = self.lock.lock().unwrap();
+        Python::attach(|py| -> PyResult<Coverage> {
+            let bytes: Vec<u8> = self.obj.bind(py).call_method0("covered")?.extract()?;
+            Ok(Coverage::from_bytes(&bytes))
+        })
+        .map_err(|e: PyErr| anyhow::anyhow!("dataset.covered(): {e}"))
+    }
+
+    fn extents(&self) -> anyhow::Result<HashMap<String, Coverage>> {
+        let _guard = self.lock.lock().unwrap();
+        Python::attach(|py| -> PyResult<HashMap<String, Coverage>> {
+            let result = self.obj.bind(py).call_method0("extents")?;
+            let mut out = HashMap::new();
+            for row in result.try_iter()? {
+                let row = row?;
+                let source: String = row.get_item(0)?.extract()?;
+                out.insert(
+                    source,
+                    Coverage::from_bytes(&row.get_item(1)?.extract::<Vec<u8>>()?),
+                );
+            }
+            Ok(out)
+        })
+        .map_err(|e: PyErr| anyhow::anyhow!("dataset.extents(): {e}"))
+    }
+
+    fn stored_items(&self, name: &str) -> anyhow::Result<Vec<StoredItem>> {
+        self.items("stored_items", Some(name))
+    }
+
+    fn commit(&self, rec: &Committed) -> anyhow::Result<()> {
+        let _guard = self.lock.lock().unwrap();
+        Python::attach(|py| -> PyResult<()> {
+            let payload = rec.payload.as_ref().map(|b| PyBytes::new(py, b));
+            self.obj.bind(py).call_method1(
+                "commit",
+                (
+                    rec.name.as_str(),
+                    rec.key.as_str(),
+                    payload,
+                    PyBytes::new(py, &rec.coverage.to_bytes()),
+                ),
+            )?;
+            Ok(())
+        })
+        .map_err(|e: PyErr| anyhow::anyhow!("dataset.commit(): {e}"))
+    }
+
+    fn consume(&self, name: &str, key: &str) -> anyhow::Result<()> {
+        let _guard = self.lock.lock().unwrap();
+        Python::attach(|py| -> PyResult<()> {
+            self.obj.bind(py).call_method1("consume", (name, key))?;
+            Ok(())
+        })
+        .map_err(|e: PyErr| anyhow::anyhow!("dataset.consume(): {e}"))
+    }
+
+    fn record_extent(&self, source: &str, extent: &Coverage) -> anyhow::Result<()> {
+        let _guard = self.lock.lock().unwrap();
+        Python::attach(|py| -> PyResult<()> {
+            self.obj.bind(py).call_method1(
+                "record_extent",
+                (source, PyBytes::new(py, &extent.to_bytes())),
+            )?;
+            Ok(())
+        })
+        .map_err(|e: PyErr| anyhow::anyhow!("dataset.record_extent(): {e}"))
+    }
+}
+
+impl Dataset for PyDataset {
+    fn store(&self) -> Arc<dyn Store> {
+        Arc::new(self.clone())
+    }
+
+    fn put(&self, item: &Committed) -> anyhow::Result<()> {
+        let Some(bytes) = &item.payload else {
+            return Ok(());
+        };
+        let _guard = self.lock.lock().unwrap();
+        Python::attach(|py| -> PyResult<()> {
+            self.obj.bind(py).call_method1(
+                "put",
+                (
+                    item.name.as_str(),
+                    item.key.as_str(),
+                    PyBytes::new(py, bytes),
+                    PyBytes::new(py, &item.coverage.to_bytes()),
+                ),
+            )?;
+            Ok(())
+        })
+        .map_err(|e: PyErr| anyhow::anyhow!("dataset.put(): {e}"))
+    }
+
+    fn stored(&self, name: &str) -> anyhow::Result<Vec<StoredItem>> {
+        self.items("stored", Some(name))
+    }
+
+    fn read(&self) -> anyhow::Result<Vec<StoredItem>> {
+        self.items("read", None)
+    }
+}
+
+/// The source-row ordinals a `Coverage` blob carries, so a custom Python dataset can compute
+/// supersession (subset/union) over shard coverage without knowing the wire format.
+#[pyfunction]
+fn coverage_rows(bytes: &[u8]) -> Vec<u64> {
+    Coverage::from_bytes(bytes).iter().collect()
+}
+
+/// Encode source-row ordinals back into a `Coverage` blob (the inverse of `coverage_rows`).
+#[pyfunction]
+fn coverage_to_bytes<'py>(py: Python<'py>, rows: Vec<u64>) -> Bound<'py, PyBytes> {
+    let mut cov = Coverage::empty();
+    for row in rows {
+        cov.insert(row);
+    }
+    PyBytes::new(py, &cov.to_bytes())
 }
 
 /// A registered Python worker: a `process(task, ctx)` callable plus the shared
@@ -561,6 +775,7 @@ struct Engine {
     resources: HashMap<String, usize>,
     dead_letter: Option<Py<PyAny>>,
     store_path: Option<String>,
+    dataset: Option<Py<PyAny>>,
     registrations: Vec<Registration>,
     chunkers: Vec<ChunkerReg>,
     checkpoints: Vec<CheckpointReg>,
@@ -601,11 +816,18 @@ impl Engine {
             resources: resources.unwrap_or_default(),
             dead_letter,
             store_path,
+            dataset: None,
             registrations: Vec::new(),
             chunkers: Vec::new(),
             checkpoints: Vec::new(),
             seeds: Vec::new(),
         }
+    }
+
+    /// Materialize data-carrying checkpoints into `obj`: either a built-in `FileDataset` or a
+    /// custom object implementing the dataset protocol. Supersedes `store_path`.
+    fn dataset(&mut self, obj: Py<PyAny>) {
+        self.dataset = Some(obj);
     }
 
     /// Register a Python checkpoint class (a `Checkpoint` subclass) so its instances are
@@ -812,7 +1034,17 @@ impl Engine {
             });
             builder = builder.checkpoint_dyn(reg.key, ops);
         }
-        if let Some(path) = &self.store_path {
+        if let Some(obj) = &self.dataset {
+            match obj.bind(py).extract::<PyRef<PyFileDataset>>() {
+                Ok(file) => builder = builder.dataset(file.inner.clone()),
+                Err(_) => {
+                    builder = builder.dataset(PyDataset {
+                        obj: Arc::new(obj.clone_ref(py)),
+                        lock: Arc::new(Mutex::new(())),
+                    })
+                }
+            }
+        } else if let Some(path) = &self.store_path {
             builder = builder.store(SqliteStore::open(path));
         }
         for seed in &self.seeds {
@@ -898,5 +1130,8 @@ fn _bask(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Engine>()?;
     m.add_class::<PyShutdown>()?;
     m.add_class::<RowAggregator>()?;
+    m.add_class::<PyFileDataset>()?;
+    m.add_function(wrap_pyfunction!(coverage_rows, m)?)?;
+    m.add_function(wrap_pyfunction!(coverage_to_bytes, m)?)?;
     Ok(())
 }

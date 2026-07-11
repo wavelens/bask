@@ -18,12 +18,12 @@ anyhow = "1"
 tokio = { version = "1", features = ["rt", "sync"] }
 arrow = { version = "59", features = ["csv", "json", "ipc"] }
 parquet = { version = "59", features = ["arrow"] }
-bytes = { version = "1", optional = true }
+bytes = "1"
 tokio-postgres = { version = "0.7", optional = true }
 futures = { version = "0.3", optional = true }
 
 [features]
-postgres = ["dep:tokio-postgres", "dep:futures", "dep:bytes"]
+postgres = ["dep:tokio-postgres", "dep:futures"]
 
 [package.metadata.docs.rs]
 all-features = true

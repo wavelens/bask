@@ -24,3 +24,11 @@ pub use bask_formats as formats;
 /// Predefined workers and routers: row-count batching and chunking.
 #[cfg(feature = "formats")]
 pub use bask_tasks as tasks;
+
+/// Sharded, self-compacting checkpoint datasets: the [`Dataset`](bask_core::Dataset) trait
+/// and the directory-backed [`FileDataset`](bask_io::FileDataset) built on it.
+#[cfg(feature = "dataset")]
+pub mod data {
+    pub use bask_core::Dataset;
+    pub use bask_io::FileDataset;
+}

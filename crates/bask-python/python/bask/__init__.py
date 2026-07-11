@@ -128,6 +128,7 @@ class Engine:
         resources: dict[str, int] | None = None,
         dead_letter: Callable[[dict], None] | None = None,
         store: str | None = None,
+        dataset: Any | None = None,
     ):
         self._concurrency = concurrency or (os.cpu_count() or 4)
         self._retry = retry or Retry()
@@ -139,6 +140,7 @@ class Engine:
         self._resources = resources
         self._dead_letter = dead_letter
         self._store = store
+        self._dataset = dataset
         self._registrations: list[_Registration] = []
         self._chunkers: list[tuple] = []
         self._routers: dict[type, Any] = {}
@@ -283,6 +285,8 @@ class Engine:
             engine.seed(task)
         for task, id in self._sources:
             engine.source(task, id)
+        if self._dataset is not None:
+            engine.dataset(getattr(self._dataset, "_dataset", self._dataset))
         raw = engine.run(self._routers, self._dedups, live, shutdown)
         outputs = {cls: inst.finalize() for cls, inst in self._routers.items()}
         unique = {marker: len(seen) for marker, seen in self._dedups.items()}

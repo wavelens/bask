@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use tokio::sync::Semaphore;
 
-use crate::checkpoint::{CheckpointOps, Checkpoints, Durability, Store};
+use crate::checkpoint::{CheckpointOps, Checkpoints, Dataset, Durability, Store};
 use crate::deadletter::DeadLetterSink;
 use crate::dedup::{Dedup, Dedups};
 use crate::interrupt::Shutdown;
@@ -59,6 +59,7 @@ pub struct EngineBuilder {
     dead_letter: Option<Arc<dyn DeadLetterSink>>,
     checkpoints: Vec<(RouteKey, Arc<dyn CheckpointOps>)>,
     store: Option<Arc<dyn Store>>,
+    dataset: Option<Arc<dyn Dataset>>,
 }
 
 pub struct Engine {
@@ -76,6 +77,7 @@ pub struct Engine {
     dead_letter: Option<Arc<dyn DeadLetterSink>>,
     checkpoints: Checkpoints,
     store: Option<Arc<dyn Store>>,
+    dataset: Option<Arc<dyn Dataset>>,
 }
 
 impl Engine {
@@ -99,6 +101,7 @@ impl Engine {
             dead_letter: None,
             checkpoints: Vec::new(),
             store: None,
+            dataset: None,
         }
     }
 
@@ -107,8 +110,8 @@ impl Engine {
             None
         } else {
             let store = self.store.unwrap_or_else(default_store);
-            let durability =
-                Durability::new(self.checkpoints, store).map_err(crate::Error::Store)?;
+            let durability = Durability::new(self.checkpoints, store, self.dataset)
+                .map_err(crate::Error::Store)?;
             Some(Arc::new(durability))
         };
         scheduler::run(
@@ -281,6 +284,18 @@ impl EngineBuilder {
         self
     }
 
+    /// Materialize data-carrying checkpoints into a [`Dataset`]: their payloads become
+    /// self-compacting shards and the dataset's own [`Store`] backs the index, so it is both
+    /// where the pipeline writes and where a later run reads. Supersedes any [`store`].
+    ///
+    /// [`store`]: EngineBuilder::store
+    pub fn dataset<D: Dataset + 'static>(mut self, dataset: D) -> Self {
+        let dataset = Arc::new(dataset);
+        self.store = Some(dataset.store());
+        self.dataset = Some(dataset);
+        self
+    }
+
     /// Register a dynamically-typed checkpoint under a runtime routing `key`; used by
     /// front-ends (the Python bindings) whose task types live outside Rust's type system.
     pub fn checkpoint_dyn(mut self, key: u64, ops: Arc<dyn CheckpointOps>) -> Self {
@@ -435,6 +450,7 @@ impl EngineBuilder {
             dead_letter: self.dead_letter,
             checkpoints,
             store: self.store,
+            dataset: self.dataset,
         }
     }
 
