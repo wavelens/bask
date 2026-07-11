@@ -204,6 +204,23 @@ impl EngineBuilder {
         self
     }
 
+    /// Seed a dynamically-typed source under a runtime routing `key`, tagged with a stable
+    /// `id` so its extent can be recorded and its descendants attributed (see [`source`]).
+    ///
+    /// [`source`]: EngineBuilder::source
+    pub fn seed_source_dyn(
+        mut self,
+        id: impl Into<String>,
+        key: u64,
+        type_name: &'static str,
+        payload: Box<dyn std::any::Any + Send + Sync>,
+    ) -> Self {
+        let mut env = Envelope::new_dyn(key, type_name, payload);
+        env.source = Some(Arc::from(id.into()));
+        self.seeds.push(env);
+        self
+    }
+
     /// Register a router; feed it from a worker with [`Context::route`](crate::Context::route).
     pub fn router<R: Router>(mut self) -> Self {
         self.routers.push(Box::new(|routers: &mut Routers, shards| {

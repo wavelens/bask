@@ -25,11 +25,12 @@ the stage with `Engine.chunker(source_cls, piece_cls, rows)`:
 """
 from __future__ import annotations
 
+import pickle
 from typing import Any
 
 from . import _bask
 
-__all__ = ["Batch", "RowBatch"]
+__all__ = ["Batch", "Checkpoint", "RowBatch"]
 
 
 class Batch:
@@ -38,6 +39,33 @@ class Batch:
 
     def __init__(self, batch: Any):
         self.batch = batch
+
+
+class Checkpoint:
+    """Mark a task type as a durable restore point: subclass it and define `key(self)`.
+    On arrival the engine materializes the task and records the source rows it covers, so
+    a re-run skips finished work and reseeds anything not yet consumed. Set `KEY_ONLY` for
+    a side effect with no payload; override `encode`/`decode` for a custom on-disk format
+    (the default is `pickle`). `NAME` defaults to the class name and is the store identity."""
+
+    _registry: list[type] = []
+    KEY_ONLY = False
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        if "NAME" not in cls.__dict__:
+            cls.NAME = cls.__name__
+        Checkpoint._registry.append(cls)
+
+    def key(self) -> str:
+        raise NotImplementedError("a Checkpoint must define key()")
+
+    def encode(self) -> bytes:
+        return pickle.dumps(self)
+
+    @classmethod
+    def decode(cls, data: bytes) -> Any:
+        return pickle.loads(data)
 
 
 class RowBatch:

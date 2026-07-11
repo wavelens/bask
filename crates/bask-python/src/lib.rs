@@ -14,13 +14,13 @@ use std::time::Duration;
 use async_trait::async_trait;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyBytes, PyDict, PyList};
 
 use arrow::pyarrow::{FromPyArrow, ToPyArrow};
 use arrow::record_batch::RecordBatch;
 use bask_core::{
-    Backoff, Cancellation, Context, DeadLetter, DeadLetterSink, DynWorker, Emitter, LiveConsole,
-    RetryExt, RetryOn, RetryPolicy, Shutdown, WorkerCfg,
+    Backoff, Cancellation, CheckpointOps, Context, DeadLetter, DeadLetterSink, DynWorker, Emitter,
+    LiveConsole, RetryExt, RetryOn, RetryPolicy, Shutdown, SqliteStore, WorkerCfg,
 };
 
 /// A retry hint a Python worker attaches to its exception via `_bask_retry`, mapped onto
@@ -116,6 +116,51 @@ fn class_key_name(cls: &Bound<'_, PyAny>) -> PyResult<(u64, String)> {
     let key = cls.as_ptr() as u64;
     let name: String = cls.getattr("__name__")?.extract()?;
     Ok((key, name))
+}
+
+/// A Python checkpoint class exposed to the engine: `key()`/`encode()` on instances and a
+/// `decode(bytes)` classmethod let the durable store materialize and replay Python tasks.
+struct PyCheckpoint {
+    name: String,
+    key_only: bool,
+    cls: Py<PyAny>,
+}
+
+impl CheckpointOps for PyCheckpoint {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn key_only(&self) -> bool {
+        self.key_only
+    }
+
+    fn key(&self, payload: &(dyn std::any::Any + Send + Sync)) -> anyhow::Result<String> {
+        Python::attach(|py| -> PyResult<String> {
+            let obj = payload.downcast_ref::<Py<PyAny>>().expect("python payload");
+            obj.bind(py).call_method0("key")?.str()?.extract()
+        })
+        .map_err(|e: PyErr| anyhow::anyhow!("checkpoint key(): {e}"))
+    }
+
+    fn encode(&self, payload: &(dyn std::any::Any + Send + Sync)) -> anyhow::Result<Vec<u8>> {
+        Python::attach(|py| -> PyResult<Vec<u8>> {
+            let obj = payload.downcast_ref::<Py<PyAny>>().expect("python payload");
+            obj.bind(py).call_method0("encode")?.extract()
+        })
+        .map_err(|e: PyErr| anyhow::anyhow!("checkpoint encode(): {e}"))
+    }
+
+    fn decode(&self, bytes: &[u8]) -> anyhow::Result<Box<dyn std::any::Any + Send + Sync>> {
+        Python::attach(|py| -> PyResult<Box<dyn std::any::Any + Send + Sync>> {
+            let obj = self
+                .cls
+                .bind(py)
+                .call_method1("decode", (PyBytes::new(py, bytes),))?;
+            Ok(Box::new(obj.unbind()))
+        })
+        .map_err(|e: PyErr| anyhow::anyhow!("checkpoint decode(): {e}"))
+    }
 }
 
 /// A registered Python worker: a `process(task, ctx)` callable plus the shared
@@ -308,6 +353,21 @@ impl Ctx {
         Ok(())
     }
 
+    /// Enqueue a task stamped with an explicit source `key` (a row ordinal). A source
+    /// worker calls this per row so a downstream checkpoint traces back to exactly the
+    /// rows it covers and a completed pass can be skipped on the next run.
+    fn emit_keyed(&self, py: Python<'_>, key: u64, task: Py<PyAny>) -> PyResult<()> {
+        let ty = task.bind(py).get_type();
+        let (route, name) = class_key_name(ty.as_any())?;
+        let type_name = intern(route, &name);
+        py.detach(|| {
+            self.emitter
+                .emit_keyed_dyn(key, route, type_name, Box::new(task))
+        })
+        .map_err(|_| PyRuntimeError::new_err("engine stopped"))?;
+        Ok(())
+    }
+
     /// Feed a value to the router registered for `router_cls`. Its `route(value, out)`
     /// folds the value into state and may `out.emit(task)` derived tasks, which are
     /// enqueued here under the same backpressure as `emit`.
@@ -380,6 +440,15 @@ struct Seed {
     key: u64,
     type_name: &'static str,
     payload: Py<PyAny>,
+    source: Option<String>,
+}
+
+/// A registered Python checkpoint class and the store identity/policy it carries.
+struct CheckpointReg {
+    key: u64,
+    name: String,
+    key_only: bool,
+    cls: Py<PyAny>,
 }
 
 /// A registered `Chunker` stage bridging pyarrow data through the Rust splitter.
@@ -434,15 +503,17 @@ struct Engine {
     catch_ctrl_c: bool,
     resources: HashMap<String, usize>,
     dead_letter: Option<Py<PyAny>>,
+    store_path: Option<String>,
     registrations: Vec<Registration>,
     chunkers: Vec<ChunkerReg>,
+    checkpoints: Vec<CheckpointReg>,
     seeds: Vec<Seed>,
 }
 
 #[pymethods]
 impl Engine {
     #[new]
-    #[pyo3(signature = (concurrency, max_attempts=1, avoid_failed=true, backoff_ms=0, jitter=0.0, sample_interval_ms=200, queue_capacity=None, timeout_ms=None, grace_ms=None, catch_ctrl_c=false, resources=None, dead_letter=None))]
+    #[pyo3(signature = (concurrency, max_attempts=1, avoid_failed=true, backoff_ms=0, jitter=0.0, sample_interval_ms=200, queue_capacity=None, timeout_ms=None, grace_ms=None, catch_ctrl_c=false, resources=None, dead_letter=None, store_path=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         concurrency: usize,
@@ -457,6 +528,7 @@ impl Engine {
         catch_ctrl_c: bool,
         resources: Option<HashMap<String, usize>>,
         dead_letter: Option<Py<PyAny>>,
+        store_path: Option<String>,
     ) -> Self {
         Engine {
             concurrency: concurrency.max(1),
@@ -471,10 +543,50 @@ impl Engine {
             catch_ctrl_c,
             resources: resources.unwrap_or_default(),
             dead_letter,
+            store_path,
             registrations: Vec::new(),
             chunkers: Vec::new(),
+            checkpoints: Vec::new(),
             seeds: Vec::new(),
         }
+    }
+
+    /// Register a Python checkpoint class (a `Checkpoint` subclass) so its instances are
+    /// materialized to the store on arrival and skipped/reseeded on a later run.
+    fn checkpoint(&mut self, py: Python<'_>, cls: Py<PyAny>) -> PyResult<()> {
+        let bound = cls.bind(py);
+        let (key, cls_name) = class_key_name(bound)?;
+        let name = bound
+            .getattr("NAME")
+            .ok()
+            .and_then(|n| n.extract().ok())
+            .unwrap_or(cls_name);
+        let key_only = bound
+            .getattr("KEY_ONLY")
+            .ok()
+            .and_then(|k| k.extract().ok())
+            .unwrap_or(false);
+        self.checkpoints.push(CheckpointReg {
+            key,
+            name,
+            key_only,
+            cls,
+        });
+        Ok(())
+    }
+
+    /// Seed a source `task` tagged with a stable `id`; its extent is recorded on a clean
+    /// pass so a later run skips it whole when a checkpoint already covers every row.
+    fn source(&mut self, py: Python<'_>, task: Py<PyAny>, id: String) -> PyResult<()> {
+        let ty = task.bind(py).get_type();
+        let (key, name) = class_key_name(ty.as_any())?;
+        self.seeds.push(Seed {
+            key,
+            type_name: intern(key, &name),
+            payload: task,
+            source: Some(id),
+        });
+        Ok(())
     }
 
     /// Register the Rust `bask_tasks::Chunker` stage: each `source_cls` instance's `batch`
@@ -541,6 +653,7 @@ impl Engine {
             key,
             type_name: intern(key, &name),
             payload: task,
+            source: None,
         });
         Ok(())
     }
@@ -634,9 +747,23 @@ impl Engine {
             }
             builder = builder.worker_dyn(reg.source_key, bridge, reg.source_type, cfg);
         }
+        for reg in &self.checkpoints {
+            let ops = Arc::new(PyCheckpoint {
+                name: reg.name.clone(),
+                key_only: reg.key_only,
+                cls: reg.cls.clone_ref(py),
+            });
+            builder = builder.checkpoint_dyn(reg.key, ops);
+        }
+        if let Some(path) = &self.store_path {
+            builder = builder.store(SqliteStore::open(path));
+        }
         for seed in &self.seeds {
             let payload = Box::new(seed.payload.clone_ref(py));
-            builder = builder.seed_dyn(seed.key, seed.type_name, payload);
+            builder = match &seed.source {
+                Some(id) => builder.seed_source_dyn(id.clone(), seed.key, seed.type_name, payload),
+                None => builder.seed_dyn(seed.key, seed.type_name, payload),
+            };
         }
 
         // Flush Python routers each epoch, so a batching router's trailing batch still
@@ -688,6 +815,7 @@ impl Engine {
         dict.set_item("processed", report.stats.processed)?;
         dict.set_item("retried", report.stats.retried)?;
         dict.set_item("failed", report.stats.failed)?;
+        dict.set_item("skipped", report.stats.skipped)?;
         dict.set_item("interrupted", report.interrupted)?;
         dict.set_item("unfinished", report.unfinished)?;
         let failures = PyList::empty(py);
