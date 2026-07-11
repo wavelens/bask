@@ -651,9 +651,12 @@ fn dispatch(d: Dispatch) {
             && let Some(ops) = d.checkpoints.get(&env.key)
         {
             let has_worker = registry.groups.contains_key(&env.key);
-            let key = ops.key(env.payload.as_ref());
-            match d.admit(ops, &key, env.payload.as_ref(), &env.keys, has_worker) {
-                Ok(Admit::Finished { skipped }) => {
+            let admitted = ops.key(env.payload.as_ref()).and_then(|key| {
+                let admit = d.admit(ops, &key, env.payload.as_ref(), &env.keys, has_worker)?;
+                Ok((admit, key))
+            });
+            match admitted {
+                Ok((Admit::Finished { skipped }, _)) => {
                     drop(permit);
                     if skipped {
                         stats.skipped.fetch_add(1, SeqCst);
@@ -663,7 +666,7 @@ fn dispatch(d: Dispatch) {
                     in_flight.dec();
                     return;
                 }
-                Ok(Admit::RunWorker) => consume = Some((ops.name().to_string(), key)),
+                Ok((Admit::RunWorker, key)) => consume = Some((ops.name().to_string(), key)),
                 Err(err) => {
                     drop(permit);
                     let (type_name, attempts) = (env.type_name, env.attempt + 1);

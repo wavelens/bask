@@ -79,6 +79,7 @@ class Report:
         self.processed: int = raw["processed"]
         self.retried: int = raw["retried"]
         self.failed: int = raw["failed"]
+        self.skipped: int = raw["skipped"]
         self.failures: list[dict] = raw["failures"]
         self.interrupted: bool = raw["interrupted"]
         self.unfinished: int = raw["unfinished"]
@@ -95,8 +96,8 @@ class Report:
     def __repr__(self) -> str:
         return (
             f"Report(processed={self.processed}, retried={self.retried}, "
-            f"failed={self.failed}, interrupted={self.interrupted}, "
-            f"unfinished={self.unfinished})"
+            f"failed={self.failed}, skipped={self.skipped}, "
+            f"interrupted={self.interrupted}, unfinished={self.unfinished})"
         )
 
 
@@ -126,6 +127,7 @@ class Engine:
         catch_ctrl_c: bool = False,
         resources: dict[str, int] | None = None,
         dead_letter: Callable[[dict], None] | None = None,
+        store: str | None = None,
     ):
         self._concurrency = concurrency or (os.cpu_count() or 4)
         self._retry = retry or Retry()
@@ -136,11 +138,13 @@ class Engine:
         self._catch_ctrl_c = catch_ctrl_c
         self._resources = resources
         self._dead_letter = dead_letter
+        self._store = store
         self._registrations: list[_Registration] = []
         self._chunkers: list[tuple] = []
         self._routers: dict[type, Any] = {}
         self._dedups: dict[type, set] = {}
         self._seeds: list[Any] = []
+        self._sources: list[tuple[Any, str]] = []
 
     def worker(
         self,
@@ -235,7 +239,16 @@ class Engine:
         self._seeds.append(task)
         return self
 
+    def source(self, task: Any, id: str) -> "Engine":
+        """Seed a source `task` tagged with a stable `id`. Its worker stamps rows with
+        `ctx.emit_keyed(ordinal, task)`; once a clean pass records the extent, a later run
+        skips the source whole if a checkpoint already covers every row."""
+        self._sources.append((task, id))
+        return self
+
     def run(self, live: bool = False, shutdown: Shutdown | None = None) -> Report:
+        from .tasks import Checkpoint
+
         engine = _bask.Engine(
             self._concurrency,
             self._retry.max_attempts,
@@ -249,6 +262,7 @@ class Engine:
             self._catch_ctrl_c,
             self._resources,
             self._dead_letter,
+            self._store,
         )
         for reg in self._registrations:
             engine.register(
@@ -263,8 +277,12 @@ class Engine:
             )
         for source_cls, piece_cls, rows, label, concurrency in self._chunkers:
             engine.chunker(source_cls, piece_cls, rows, label, concurrency)
+        for cls in Checkpoint._registry:
+            engine.checkpoint(cls)
         for task in self._seeds:
             engine.seed(task)
+        for task, id in self._sources:
+            engine.source(task, id)
         raw = engine.run(self._routers, self._dedups, live, shutdown)
         outputs = {cls: inst.finalize() for cls, inst in self._routers.items()}
         unique = {marker: len(seen) for marker, seen in self._dedups.items()}

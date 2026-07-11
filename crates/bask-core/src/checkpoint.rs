@@ -234,7 +234,7 @@ impl Store for MemStore {
 pub trait CheckpointOps: Send + Sync {
     fn name(&self) -> &str;
     fn key_only(&self) -> bool;
-    fn key(&self, payload: &(dyn Any + Send + Sync)) -> String;
+    fn key(&self, payload: &(dyn Any + Send + Sync)) -> anyhow::Result<String>;
     fn encode(&self, payload: &(dyn Any + Send + Sync)) -> anyhow::Result<Vec<u8>>;
     fn decode(&self, bytes: &[u8]) -> anyhow::Result<Box<dyn Any + Send + Sync>>;
 }
@@ -480,8 +480,8 @@ mod derive_support {
         fn key_only(&self) -> bool {
             self.0.key_only
         }
-        fn key(&self, payload: &(dyn Any + Send + Sync)) -> String {
-            (self.0.key)(payload)
+        fn key(&self, payload: &(dyn Any + Send + Sync)) -> anyhow::Result<String> {
+            Ok((self.0.key)(payload))
         }
         fn encode(&self, payload: &(dyn Any + Send + Sync)) -> anyhow::Result<Vec<u8>> {
             (self.0.encode)(payload)
