@@ -5,7 +5,9 @@
  */
 
 use std::any::{Any, TypeId};
+use std::sync::Arc;
 
+use crate::checkpoint::Coverage;
 use crate::resource::Select;
 
 /// Any `Send + Sync + 'static` value is a task; there is no central enum to edit.
@@ -32,6 +34,10 @@ pub(crate) struct Envelope {
     pub tried: TriedMask,
     pub last: Option<u16>,
     pub select: Option<Select>,
+    /// The source rows this task covers; empty unless provenance is active.
+    pub keys: Coverage,
+    /// The source this task descends from, if seeded via [`source`](crate::EngineBuilder::source).
+    pub source: Option<Arc<str>>,
 }
 
 impl Envelope {
@@ -44,6 +50,27 @@ impl Envelope {
             tried: TriedMask::empty(),
             last: None,
             select: None,
+            keys: Coverage::empty(),
+            source: None,
+        }
+    }
+
+    /// Rebuild an envelope for a stored checkpoint item replayed on a later run.
+    pub fn reseed(
+        key: RouteKey,
+        type_name: &'static str,
+        payload: Box<dyn Any + Send + Sync>,
+    ) -> Self {
+        Envelope {
+            key,
+            type_name,
+            payload,
+            attempt: 0,
+            tried: TriedMask::empty(),
+            last: None,
+            select: None,
+            keys: Coverage::empty(),
+            source: None,
         }
     }
 
@@ -56,6 +83,8 @@ impl Envelope {
             tried: TriedMask::empty(),
             last: None,
             select: None,
+            keys: Coverage::empty(),
+            source: None,
         }
     }
 }

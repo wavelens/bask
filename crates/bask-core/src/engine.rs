@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use tokio::sync::Semaphore;
 
+use crate::checkpoint::{CheckpointOps, Checkpoints, Durability, Store};
 use crate::deadletter::DeadLetterSink;
 use crate::dedup::{Dedup, Dedups};
 use crate::interrupt::Shutdown;
@@ -56,6 +57,8 @@ pub struct EngineBuilder {
     flush_hook: Option<scheduler::FlushHook>,
     resources: HashMap<String, usize>,
     dead_letter: Option<Arc<dyn DeadLetterSink>>,
+    checkpoints: Vec<(RouteKey, Arc<dyn CheckpointOps>)>,
+    store: Option<Arc<dyn Store>>,
 }
 
 pub struct Engine {
@@ -71,6 +74,8 @@ pub struct Engine {
     sample_interval: Duration,
     flush_hook: Option<scheduler::FlushHook>,
     dead_letter: Option<Arc<dyn DeadLetterSink>>,
+    checkpoints: Checkpoints,
+    store: Option<Arc<dyn Store>>,
 }
 
 impl Engine {
@@ -92,10 +97,20 @@ impl Engine {
             flush_hook: None,
             resources: HashMap::new(),
             dead_letter: None,
+            checkpoints: Vec::new(),
+            store: None,
         }
     }
 
     pub async fn run(self) -> crate::Result<RunReport> {
+        let durability = if self.checkpoints.is_empty() {
+            None
+        } else {
+            let store = self.store.unwrap_or_else(default_store);
+            let durability =
+                Durability::new(self.checkpoints, store).map_err(crate::Error::Store)?;
+            Some(Arc::new(durability))
+        };
         scheduler::run(
             Arc::new(self.registry),
             Arc::new(self.routers),
@@ -109,8 +124,23 @@ impl Engine {
             self.sample_interval,
             self.flush_hook,
             self.dead_letter,
+            durability,
         )
         .await
+    }
+}
+
+/// The default checkpoint store: `bask.sqlite` in the working directory, created lazily.
+/// Without the `checkpoint` feature there is no sqlite, so dynamic checkpoints fall back
+/// to an in-memory store.
+fn default_store() -> Arc<dyn Store> {
+    #[cfg(feature = "checkpoint")]
+    {
+        Arc::new(crate::sqlite::SqliteStore::open("bask.sqlite"))
+    }
+    #[cfg(not(feature = "checkpoint"))]
+    {
+        Arc::new(crate::checkpoint::MemStore::default())
     }
 }
 
@@ -213,6 +243,31 @@ impl EngineBuilder {
 
     pub fn seed<T: Task>(mut self, task: T) -> Self {
         self.seeds.push(Envelope::new(task));
+        self
+    }
+
+    /// Seed a source: a task whose descendants stamp source rows (via
+    /// [`Context::emit_keyed`](crate::Context::emit_keyed)) under the stable `id`. Once a
+    /// clean pass records the source's extent, a later run skips it whole if a checkpoint
+    /// already covers every row (no CSV re-read).
+    pub fn source<T: Task>(mut self, id: impl Into<String>, task: T) -> Self {
+        let mut env = Envelope::new(task);
+        env.source = Some(Arc::from(id.into()));
+        self.seeds.push(env);
+        self
+    }
+
+    /// Back checkpoints with a specific [`Store`] instead of the default `bask.sqlite`.
+    /// Pass a [`MemStore`](crate::MemStore) to keep durability opt-out but still dedup.
+    pub fn store<S: Store + 'static>(mut self, store: S) -> Self {
+        self.store = Some(Arc::new(store));
+        self
+    }
+
+    /// Register a dynamically-typed checkpoint under a runtime routing `key`; used by
+    /// front-ends (the Python bindings) whose task types live outside Rust's type system.
+    pub fn checkpoint_dyn(mut self, key: u64, ops: Arc<dyn CheckpointOps>) -> Self {
+        self.checkpoints.push((RouteKey::Dyn(key), ops));
         self
     }
 
@@ -340,6 +395,14 @@ impl EngineBuilder {
         for factory in self.dedups {
             factory(&mut dedups, concurrency);
         }
+        let mut checkpoints = Checkpoints::default();
+        #[cfg(feature = "checkpoint")]
+        for (type_id, ops) in crate::checkpoint::registered() {
+            checkpoints.insert(RouteKey::Static(type_id), ops);
+        }
+        for (key, ops) in self.checkpoints {
+            checkpoints.insert(key, ops);
+        }
         Engine {
             registry,
             routers,
@@ -353,6 +416,8 @@ impl EngineBuilder {
             sample_interval: self.sample_interval,
             flush_hook: self.flush_hook,
             dead_letter: self.dead_letter,
+            checkpoints,
+            store: self.store,
         }
     }
 

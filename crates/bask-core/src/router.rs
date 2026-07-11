@@ -8,7 +8,20 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use crate::checkpoint::Coverage;
 use crate::task::{Envelope, Task};
+
+/// Stamp the rows folded since the last emit onto whatever the router just emitted, then
+/// reset the accumulator: a batch/concat covers the union of its inputs, a filtered input
+/// folds into the next emit's coverage, and a fan-out shares its input's coverage.
+fn stamp(pending: &mut Coverage, out: &mut Emit, start: usize) {
+    if out.envelopes.len() > start {
+        let cov = std::mem::take(pending);
+        for env in &mut out.envelopes[start..] {
+            env.keys = cov.clone();
+        }
+    }
+}
 
 /// The tasks a router emits while handling one input. Drained into the queue with
 /// backpressure after the router's state lock is released, so folding stays lock-light.
@@ -65,24 +78,38 @@ pub trait Router: Send + Sync + 'static {
     fn finalize(state: Self::State) -> Self::Output;
 }
 
+/// One router shard: user state plus the coverage folded since its last emit.
+struct Shard<R: Router> {
+    state: R::State,
+    pending: Coverage,
+}
+
 /// Sharded state for one router: inputs fold into a shard, shards merge at the end.
 pub(crate) struct Holder<R: Router> {
-    shards: Vec<Mutex<R::State>>,
+    shards: Vec<Mutex<Shard<R>>>,
 }
 
 impl<R: Router> Holder<R> {
     fn new(shards: usize) -> Self {
         Holder {
             shards: (0..shards.max(1))
-                .map(|_| Mutex::new(R::State::default()))
+                .map(|_| {
+                    Mutex::new(Shard {
+                        state: R::State::default(),
+                        pending: Coverage::empty(),
+                    })
+                })
                 .collect(),
         }
     }
 
-    fn route(&self, shard: usize, input: R::Input, out: &mut Emit) {
+    fn route(&self, shard: usize, input: R::Input, cov: &Coverage, out: &mut Emit) {
         let idx = shard % self.shards.len();
         let mut guard = self.shards[idx].lock().unwrap();
-        R::route(&mut guard, input, out);
+        guard.pending.union_with(cov);
+        let start = out.envelopes.len();
+        R::route(&mut guard.state, input, out);
+        stamp(&mut guard.pending, out, start);
     }
 }
 
@@ -100,7 +127,9 @@ impl<R: Router> AnyRouter for Holder<R> {
     fn flush(&self, out: &mut Emit) {
         for shard in &self.shards {
             let mut guard = shard.lock().unwrap();
-            R::flush(&mut guard, out);
+            let start = out.envelopes.len();
+            R::flush(&mut guard.state, out);
+            stamp(&mut guard.pending, out, start);
         }
     }
 
@@ -108,7 +137,7 @@ impl<R: Router> AnyRouter for Holder<R> {
         let mut acc = R::State::default();
         for shard in &self.shards {
             let mut guard = shard.lock().unwrap();
-            R::merge(&mut acc, std::mem::take(&mut guard));
+            R::merge(&mut acc, std::mem::take(&mut guard.state));
         }
         Box::new(R::finalize(acc))
     }
@@ -125,13 +154,13 @@ impl Routers {
             .insert(TypeId::of::<R>(), Arc::new(Holder::<R>::new(shards)));
     }
 
-    pub fn route<R: Router>(&self, shard: usize, input: R::Input, out: &mut Emit) {
+    pub fn route<R: Router>(&self, shard: usize, input: R::Input, cov: &Coverage, out: &mut Emit) {
         match self.map.get(&TypeId::of::<R>()) {
             Some(h) => h
                 .as_any()
                 .downcast_ref::<Holder<R>>()
                 .expect("router type mismatch")
-                .route(shard, input, out),
+                .route(shard, input, cov, out),
             None => panic!("router {} not registered", std::any::type_name::<R>()),
         }
     }
