@@ -23,6 +23,7 @@ tokio-postgres = { version = "0.7", optional = true }
 futures = { version = "0.3", optional = true }
 
 [features]
+default = ["postgres"]
 postgres = ["dep:tokio-postgres", "dep:futures"]
 
 [package.metadata.docs.rs]

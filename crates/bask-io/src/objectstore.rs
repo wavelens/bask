@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::StreamExt;
 use object_store::path::Path as StorePath;
-use object_store::{ObjectStore, parse_url};
+use object_store::{ObjectStore, ObjectStoreExt, parse_url};
 use url::Url;
 
 use super::{Keyed, Sink, SinkRegistry, Source, SourceRegistry, Target};
