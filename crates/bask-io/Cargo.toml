@@ -20,10 +20,16 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 object_store = { version = "0.11", features = ["aws"], optional = true }
 url = { version = "2", optional = true }
 futures = { version = "0.3", optional = true }
+rusqlite = { version = "0.39", features = ["bundled"], optional = true }
+blake3 = { version = "1", optional = true }
 
 [features]
 download = ["dep:reqwest"]
 object-store = ["dep:object_store", "dep:url", "dep:futures"]
+dataset = ["dep:rusqlite", "dep:blake3"]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 [package.metadata.docs.rs]
 all-features = true

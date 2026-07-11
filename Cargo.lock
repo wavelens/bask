@@ -355,6 +355,9 @@ dependencies = [
  "bask-io",
  "bask-tasks",
  "object_store",
+ "rusqlite",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 
@@ -397,10 +400,12 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bask-core",
+ "blake3",
  "bytes",
  "futures",
  "object_store",
  "reqwest",
+ "rusqlite",
  "tokio",
  "url",
 ]
@@ -423,6 +428,7 @@ dependencies = [
  "arrow",
  "async-trait",
  "bask-core",
+ "bask-io",
  "bask-tasks",
  "pyo3",
  "tokio",

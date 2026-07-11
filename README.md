@@ -268,6 +268,30 @@ engine = Engine(store="bask.sqlite")     # default when a checkpoint participate
 engine.source(Feed(), "feed")            # a source worker calls ctx.emit_keyed(ordinal, task)
 ```
 
+## Datasets
+
+A `Dataset` is where data-carrying checkpoints materialize: each payload becomes a
+self-compacting shard, and provenance coverage retires the shards a later save re-derives,
+so `feed -> save -> edit -> resave` leaves only the final shards. The built-in `FileDataset`
+(feature `dataset`) writes content-addressed Parquet over one `bask.sqlite`; a later run
+reads the latest committed snapshot.
+
+```python
+from bask import Engine
+from bask.data import Dataset, BatchCheckpoint
+
+class Chunk(BatchCheckpoint):            # a pyarrow batch, stored as a Parquet shard
+    def key(self): return str(self.batch.column(0)[0].as_py())
+
+data = Dataset("out")                    # a directory of *.parquet openable by pyarrow/duckdb
+Engine(dataset=data).run()               # ... then: data.to_pyarrow()
+```
+
+`Dataset` is a trait, so a checkpoint can materialize into your own store instead: implement
+it (in Rust, or from Python as an object with the same methods) to back a database -- a
+Postgres table, say. See `crates/bask/examples/dataset.rs` and
+`crates/bask-python/examples/dataset.py` for a sqlite-backed connector.
+
 ## Crates
 
 You depend only on `bask`; it re-exports the engine at the crate root and the rest behind
@@ -277,7 +301,7 @@ features. The internals are separate crates so the engine stays dependency-light
 |----------------|---------------------------------------------------|---------------------------------|
 | `bask-core`    | engine: workers, routers, scheduler, retry        | `bask` root and `bask::prelude` |
 | `bask-macros`  | `#[derive(Checkpoint)]`                            | `bask::Checkpoint`              |
-| `bask-io`      | pluggable source/sink IO plane                    | `bask::io` (feature `io`)       |
+| `bask-io`      | pluggable source/sink IO plane; `FileDataset`     | `bask::io`, `bask::data` (features `io`, `dataset`) |
 | `bask-formats` | Arrow/Parquet/CSV/JSONL and record IO             | `bask::formats` (feature `formats`) |
 | `bask-tasks`   | predefined workers and routers (chunk, row-batch) | `bask::tasks` (feature `formats`) |
 

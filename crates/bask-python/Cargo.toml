@@ -13,6 +13,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 bask-core.workspace = true
 bask-tasks.workspace = true
+bask-io = { workspace = true, features = ["dataset"] }
 pyo3 = { version = "0.29", features = ["abi3-py39"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 async-trait = "0.1"

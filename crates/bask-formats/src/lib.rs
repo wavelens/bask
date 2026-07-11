@@ -18,7 +18,7 @@ pub mod postgres;
 
 pub use formats::{
     ArrowFormat, Chunk, ChunkReader, ChunkWriter, CsvFormat, Format, JsonlFormat, ParquetFormat,
-    for_path,
+    for_path, read_parquet_bytes, to_parquet_bytes,
 };
 pub use records::{FormatSink, FormatSource, RotatingRecordSink, record_sinks, record_sources};
 

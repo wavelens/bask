@@ -22,7 +22,7 @@ mod rebatch;
 pub use self::arrow::ArrowFormat;
 pub use self::csv::CsvFormat;
 pub use self::jsonl::JsonlFormat;
-pub use self::parquet::ParquetFormat;
+pub use self::parquet::{ParquetFormat, read_parquet_bytes, to_parquet_bytes};
 
 /// One chunk of a stream: a columnar Arrow RecordBatch of a bounded number of rows.
 pub type Chunk = RecordBatch;

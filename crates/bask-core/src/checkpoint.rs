@@ -144,6 +144,29 @@ impl<S: Store + ?Sized> Store for Arc<S> {
     }
 }
 
+/// A checkpoint's materialization target: the durable backing a data-carrying checkpoint
+/// spills into, standalone from the [`Store`] it reserves for its own bookkeeping (status,
+/// coverage, extents). [`put`](Dataset::put) persists one checkpoint as a content-addressed
+/// shard and compacts, by provenance coverage, the shards a later save supersedes;
+/// [`read`](Dataset::read) streams the live shards back, so a dataset is both where a
+/// pipeline writes and where the next run reads. bask-io's `FileDataset` keeps Parquet
+/// shards over `bask.sqlite`; implement this trait to target your own store (e.g. Postgres).
+pub trait Dataset: Send + Sync {
+    /// The durable index this dataset reserves; a `FileDataset`'s is `bask.sqlite` in its
+    /// directory, a database dataset's a table in that same database.
+    fn store(&self) -> Arc<dyn Store>;
+
+    /// Persist one materialized checkpoint as a shard, compacting older shards whose
+    /// coverage a newer save has fully re-derived.
+    fn put(&self, item: &Committed) -> anyhow::Result<()>;
+
+    /// The live shards for one checkpoint name, to reseed materialized-but-unconsumed items.
+    fn stored(&self, name: &str) -> anyhow::Result<Vec<StoredItem>>;
+
+    /// Every live shard as a newest-snapshot stream, to read the dataset back as a source.
+    fn read(&self) -> anyhow::Result<Vec<StoredItem>>;
+}
+
 /// A stored item in memory: its status, optional payload, and coverage.
 type MemItem = (Status, Option<Vec<u8>>, Coverage);
 
@@ -278,13 +301,18 @@ pub(crate) enum Admit {
 pub(crate) struct Durability {
     pub checkpoints: Checkpoints,
     store: Arc<dyn Store>,
+    dataset: Option<Arc<dyn Dataset>>,
     index: Mutex<HashMap<(String, String), Status>>,
     running: Mutex<HashSet<(String, String)>>,
     extents: Mutex<HashMap<Arc<str>, Coverage>>,
 }
 
 impl Durability {
-    pub fn new(checkpoints: Checkpoints, store: Arc<dyn Store>) -> anyhow::Result<Self> {
+    pub fn new(
+        checkpoints: Checkpoints,
+        store: Arc<dyn Store>,
+        dataset: Option<Arc<dyn Dataset>>,
+    ) -> anyhow::Result<Self> {
         let index = store
             .statuses()?
             .into_iter()
@@ -293,6 +321,7 @@ impl Durability {
         Ok(Durability {
             checkpoints,
             store,
+            dataset,
             index: Mutex::new(index),
             running: Mutex::new(HashSet::new()),
             extents: Mutex::new(HashMap::new()),
@@ -307,8 +336,23 @@ impl Durability {
         self.store.extents()
     }
 
+    /// Materialized-but-unconsumed items to replay. With a dataset the content lives in its
+    /// live shards; the index still gates which are unconsumed (a consumed shard stays live
+    /// as data but is not reseeded).
     pub fn stored_items(&self, name: &str) -> anyhow::Result<Vec<StoredItem>> {
-        self.store.stored_items(name)
+        match &self.dataset {
+            Some(dataset) => {
+                let index = self.index.lock().unwrap();
+                Ok(dataset
+                    .stored(name)?
+                    .into_iter()
+                    .filter(|item| {
+                        index.get(&(name.to_string(), item.key.clone())) == Some(&Status::Stored)
+                    })
+                    .collect())
+            }
+            None => self.store.stored_items(name),
+        }
     }
 
     /// Note a source row minted under `source`, folding it into that source's extent.
@@ -363,12 +407,30 @@ impl Durability {
                 } else {
                     Some(ops.encode(payload)?)
                 };
-                self.store.commit(&Committed {
-                    name: name.clone(),
-                    key: key.to_string(),
-                    payload: bytes,
-                    coverage: coverage.clone(),
-                })?;
+                // With a dataset the store keeps only the index (status + coverage) and the
+                // payload becomes a self-compacting shard; without one it holds the bytes.
+                match (&self.dataset, bytes) {
+                    (Some(dataset), Some(content)) => {
+                        self.store.commit(&Committed {
+                            name: name.clone(),
+                            key: key.to_string(),
+                            payload: None,
+                            coverage: coverage.clone(),
+                        })?;
+                        dataset.put(&Committed {
+                            name: name.clone(),
+                            key: key.to_string(),
+                            payload: Some(content),
+                            coverage: coverage.clone(),
+                        })?;
+                    }
+                    (_, payload) => self.store.commit(&Committed {
+                        name: name.clone(),
+                        key: key.to_string(),
+                        payload,
+                        coverage: coverage.clone(),
+                    })?,
+                }
                 if has_worker {
                     self.claim(&name, key);
                     Ok(Admit::RunWorker)

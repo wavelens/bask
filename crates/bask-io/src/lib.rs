@@ -15,6 +15,9 @@ mod blob;
 mod registry;
 mod worker;
 
+#[cfg(feature = "dataset")]
+mod dataset;
+
 #[cfg(feature = "download")]
 mod download;
 
@@ -26,6 +29,9 @@ pub use bytes::Bytes;
 pub use blob::{FileBlobSink, FileBlobSource};
 pub use registry::{SinkRegistry, SourceRegistry, Target};
 pub use worker::{Read, SinkWorker, SourceWorker};
+
+#[cfg(feature = "dataset")]
+pub use dataset::FileDataset;
 
 #[cfg(feature = "download")]
 pub use download::HttpSource;

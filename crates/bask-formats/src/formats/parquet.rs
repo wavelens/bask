@@ -38,6 +38,25 @@ impl Format for ParquetFormat {
     }
 }
 
+/// Serialize a batch to a self-contained Parquet buffer (one row group); the inverse of
+/// [`read_parquet_bytes`]. A dataset-backed checkpoint encodes its shard with this.
+pub fn to_parquet_bytes(batch: &Chunk) -> anyhow::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    let mut writer = ArrowWriter::try_new(&mut buf, batch.schema(), None)?;
+    writer.write(batch)?;
+    writer.close()?;
+    Ok(buf)
+}
+
+/// Read every batch from a Parquet buffer, e.g. a shard read back from a [`Dataset`].
+///
+/// [`Dataset`]: bask_core::Dataset
+pub fn read_parquet_bytes(bytes: &[u8]) -> anyhow::Result<Vec<Chunk>> {
+    let reader =
+        ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::copy_from_slice(bytes))?.build()?;
+    Ok(reader.collect::<Result<Vec<_>, _>>()?)
+}
+
 struct ParquetChunkReader {
     reader: ParquetRecordBatchReader,
 }
