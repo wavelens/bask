@@ -16,11 +16,11 @@ async-trait = "0.1"
 anyhow = "1"
 bytes = "1"
 tokio = { version = "1", features = ["rt", "fs", "sync"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
-object_store = { version = "0.11", features = ["aws"], optional = true }
+reqwest = { version = "0.13", default-features = false, optional = true }
+object_store = { version = "0.14", features = ["aws"], optional = true }
 url = { version = "2", optional = true }
 futures = { version = "0.3", optional = true }
-rusqlite = { version = "0.39", features = ["bundled"], optional = true }
+rusqlite = { version = "0.40", features = ["bundled"], optional = true }
 blake3 = { version = "1", optional = true }
 
 [features]
