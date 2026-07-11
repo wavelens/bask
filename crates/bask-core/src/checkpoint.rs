@@ -286,6 +286,10 @@ impl Checkpoints {
     pub fn is_empty(&self) -> bool {
         self.by_key.is_empty()
     }
+
+    pub fn names(&self) -> Vec<&str> {
+        self.by_key.values().map(|ops| ops.name()).collect()
+    }
 }
 
 /// What to do with a checkpoint task once its store state is known.
@@ -302,6 +306,7 @@ pub(crate) struct Durability {
     pub checkpoints: Checkpoints,
     store: Arc<dyn Store>,
     dataset: Option<Arc<dyn Dataset>>,
+    selection: Option<HashSet<String>>,
     index: Mutex<HashMap<(String, String), Status>>,
     running: Mutex<HashSet<(String, String)>>,
     extents: Mutex<HashMap<Arc<str>, Coverage>>,
@@ -312,6 +317,7 @@ impl Durability {
         checkpoints: Checkpoints,
         store: Arc<dyn Store>,
         dataset: Option<Arc<dyn Dataset>>,
+        selection: Option<HashSet<String>>,
     ) -> anyhow::Result<Self> {
         let index = store
             .statuses()?
@@ -322,10 +328,20 @@ impl Durability {
             checkpoints,
             store,
             dataset,
+            selection,
             index: Mutex::new(index),
             running: Mutex::new(HashSet::new()),
             extents: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// A `--tasks` selection makes a chosen checkpoint a terminal boundary: it materializes
+    /// but its downstream worker never runs, so the pipeline stops there while its feeders
+    /// still run. Absent a selection every checkpoint behaves normally.
+    pub fn is_terminal(&self, name: &str) -> bool {
+        self.selection
+            .as_ref()
+            .is_some_and(|names| names.contains(name))
     }
 
     pub fn covered(&self) -> anyhow::Result<Coverage> {
@@ -384,6 +400,9 @@ impl Durability {
         has_worker: bool,
     ) -> anyhow::Result<Admit> {
         let name = ops.name().to_string();
+        // A selected checkpoint is a terminal boundary: materialize it, but never run its
+        // downstream worker, so a `--tasks` run stops at the boundary it named.
+        let has_worker = has_worker && !self.is_terminal(&name);
         let prev = {
             let mut index = self.index.lock().unwrap();
             let slot = (name.clone(), key.to_string());

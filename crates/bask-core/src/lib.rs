@@ -12,6 +12,8 @@
 //! formats, and predefined tasks build on this crate; most users depend on `bask`.
 
 mod checkpoint;
+#[cfg(feature = "cli")]
+pub mod cli;
 mod context;
 mod deadletter;
 mod dedup;
@@ -37,11 +39,11 @@ pub use checkpoint::{
 pub use context::Context;
 pub use deadletter::{DeadLetter, DeadLetterSink};
 pub use dedup::Dedup;
-pub use engine::{Engine, EngineBuilder};
+pub use engine::{Engine, EngineBuilder, TaskInfo};
 pub use error::{Error, Result};
 pub use interrupt::{Cancellation, Shutdown};
 pub use metrics::{Snapshot, WorkerStat};
-pub use monitor::{LiveConsole, Monitor};
+pub use monitor::{JsonConsole, LiveConsole, Monitor};
 pub use report::{RunReport, Stats, TaskFailure};
 pub use resource::{Attrs, Select};
 pub use retry::{Backoff, RetryExt, RetryOn, RetryPolicy};

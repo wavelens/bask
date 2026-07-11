@@ -5,7 +5,7 @@
  */
 
 use std::any::TypeId;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::time::Duration;
@@ -37,8 +37,17 @@ struct InstanceSpec {
     retry: Option<RetryPolicy>,
 }
 
-type RouterFactory = Box<dyn FnOnce(&mut Routers, usize)>;
-type DedupFactory = Box<dyn FnOnce(&mut Dedups, usize)>;
+type RouterFactory = Box<dyn FnOnce(&mut Routers, usize) + Send>;
+type DedupFactory = Box<dyn FnOnce(&mut Dedups, usize) + Send>;
+
+/// One addressable checkpoint task for `list-tasks`: its store name, the worker type that
+/// consumes it (if any), and how many index items are stored (pending) vs consumed (done).
+pub struct TaskInfo {
+    pub name: String,
+    pub worker_type: Option<&'static str>,
+    pub stored: usize,
+    pub done: usize,
+}
 
 pub struct EngineBuilder {
     specs: HashMap<RouteKey, Vec<InstanceSpec>>,
@@ -60,6 +69,7 @@ pub struct EngineBuilder {
     checkpoints: Vec<(RouteKey, Arc<dyn CheckpointOps>)>,
     store: Option<Arc<dyn Store>>,
     dataset: Option<Arc<dyn Dataset>>,
+    selection: Option<HashSet<String>>,
 }
 
 pub struct Engine {
@@ -78,6 +88,7 @@ pub struct Engine {
     checkpoints: Checkpoints,
     store: Option<Arc<dyn Store>>,
     dataset: Option<Arc<dyn Dataset>>,
+    selection: Option<HashSet<String>>,
 }
 
 impl Engine {
@@ -102,7 +113,39 @@ impl Engine {
             checkpoints: Vec::new(),
             store: None,
             dataset: None,
+            selection: None,
         }
+    }
+
+    /// The checkpoint names, the addressable `--tasks` units; used by the CLI to validate a
+    /// selection.
+    pub fn checkpoint_names(&self) -> Vec<&str> {
+        self.checkpoints.names()
+    }
+
+    /// The checkpoints as addressable tasks with their index status, for `list-tasks`. Reads
+    /// the store (or the default `bask.sqlite`) without running.
+    pub fn tasks(&self) -> crate::Result<Vec<TaskInfo>> {
+        let store = self.store.clone().unwrap_or_else(default_store);
+        let statuses = store.statuses().map_err(crate::Error::Store)?;
+        let count = |name: &str, want: crate::Status| {
+            statuses
+                .iter()
+                .filter(|(n, _, status)| n == name && *status == want)
+                .count()
+        };
+        let mut tasks: Vec<TaskInfo> = self
+            .checkpoints
+            .iter()
+            .map(|(route_key, ops)| TaskInfo {
+                name: ops.name().to_string(),
+                worker_type: self.registry.groups.get(route_key).map(|g| g.worker_type),
+                stored: count(ops.name(), crate::Status::Stored),
+                done: count(ops.name(), crate::Status::Consumed),
+            })
+            .collect();
+        tasks.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(tasks)
     }
 
     pub async fn run(self) -> crate::Result<RunReport> {
@@ -110,7 +153,7 @@ impl Engine {
             None
         } else {
             let store = self.store.unwrap_or_else(default_store);
-            let durability = Durability::new(self.checkpoints, store, self.dataset)
+            let durability = Durability::new(self.checkpoints, store, self.dataset, self.selection)
                 .map_err(crate::Error::Store)?;
             Some(Arc::new(durability))
         };
@@ -289,10 +332,24 @@ impl EngineBuilder {
     /// where the pipeline writes and where a later run reads. Supersedes any [`store`].
     ///
     /// [`store`]: EngineBuilder::store
-    pub fn dataset<D: Dataset + 'static>(mut self, dataset: D) -> Self {
-        let dataset = Arc::new(dataset);
+    pub fn dataset<D: Dataset + 'static>(self, dataset: D) -> Self {
+        self.dataset_arc(Arc::new(dataset))
+    }
+
+    /// Bind an already-boxed [`Dataset`]; the CLI uses this to apply `--dataset` from a
+    /// front-end-provided opener.
+    pub fn dataset_arc(mut self, dataset: Arc<dyn Dataset>) -> Self {
         self.store = Some(dataset.store());
         self.dataset = Some(dataset);
+        self
+    }
+
+    /// Restrict the run to the named checkpoints: each becomes a terminal boundary that
+    /// materializes but does not run its downstream worker, so the pipeline stops there
+    /// while its feeders still run. The CLI's `--tasks` maps onto this; combined with resume
+    /// it lets a later run continue from a boundary a prior run stopped at.
+    pub fn select_tasks(mut self, names: impl IntoIterator<Item = String>) -> Self {
+        self.selection = Some(names.into_iter().collect());
         self
     }
 
@@ -451,6 +508,7 @@ impl EngineBuilder {
             checkpoints,
             store: self.store,
             dataset: self.dataset,
+            selection: self.selection,
         }
     }
 

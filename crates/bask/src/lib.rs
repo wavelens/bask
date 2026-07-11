@@ -32,3 +32,24 @@ pub mod data {
     pub use bask_core::Dataset;
     pub use bask_io::FileDataset;
 }
+
+/// The one Rust CLI frontend: `bask::cli::run(engine, std::env::args())` gives a script the
+/// `run` / `list-tasks` / `--tasks` interface, live progress, and `--json`, with `--dataset`
+/// wired to a [`FileDataset`](bask_io::FileDataset).
+#[cfg(feature = "cli")]
+pub mod cli {
+    use std::sync::Arc;
+
+    use bask_core::{Dataset, EngineBuilder};
+    use bask_io::FileDataset;
+
+    pub use bask_core::cli::Cli;
+
+    /// Parse `args`, apply the run-level flags, and run or `list-tasks`; returns an exit code.
+    pub async fn run(builder: EngineBuilder, args: impl IntoIterator<Item = String>) -> i32 {
+        Cli::new()
+            .dataset_opener(|dir| Ok(Arc::new(FileDataset::open(dir)?) as Arc<dyn Dataset>))
+            .run(builder, args)
+            .await
+    }
+}

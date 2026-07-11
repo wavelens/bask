@@ -946,6 +946,84 @@ impl Engine {
         live: bool,
         shutdown: Option<Py<PyShutdown>>,
     ) -> PyResult<Py<PyAny>> {
+        let mut builder = self.assemble(py, &routers, &dedups, shutdown.as_ref());
+        if live {
+            builder = builder.monitor(LiveConsole::new());
+        }
+        let engine = builder.build();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| PyRuntimeError::new_err(format!("tokio runtime: {e}")))?;
+        // Drop the runtime with the GIL released. A graceful shutdown can leave cancelled
+        // `spawn_blocking` workers running; the runtime's drop waits for them and they need
+        // the GIL to finish, so holding it here would deadlock.
+        let report = py
+            .detach(|| {
+                let report = runtime.block_on(engine.run());
+                drop(runtime);
+                report
+            })
+            .map_err(|e| PyRuntimeError::new_err(format!("{e}")))?;
+
+        let dict = PyDict::new(py);
+        dict.set_item("processed", report.stats.processed)?;
+        dict.set_item("retried", report.stats.retried)?;
+        dict.set_item("failed", report.stats.failed)?;
+        dict.set_item("skipped", report.stats.skipped)?;
+        dict.set_item("interrupted", report.interrupted)?;
+        dict.set_item("unfinished", report.unfinished)?;
+        let failures = PyList::empty(py);
+        for failure in &report.failures {
+            let item = PyDict::new(py);
+            item.set_item("task_type", failure.task_type)?;
+            item.set_item("instance", failure.instance.as_str())?;
+            item.set_item("attempts", failure.attempts)?;
+            item.set_item("error", failure.error.as_str())?;
+            failures.append(item)?;
+        }
+        dict.set_item("failures", failures)?;
+        Ok(dict.into_any().unbind())
+    }
+
+    /// Drive the Rust CLI frontend over this engine, forwarding `argv`: `run`/`list-tasks`/
+    /// `--tasks`/`--json` and exit codes are all Rust, so Python mirrors the binary for free.
+    fn cli(
+        &self,
+        py: Python<'_>,
+        routers: Py<PyAny>,
+        dedups: Py<PyAny>,
+        argv: Vec<String>,
+    ) -> PyResult<i32> {
+        let builder = self.assemble(py, &routers, &dedups, None);
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| PyRuntimeError::new_err(format!("tokio runtime: {e}")))?;
+        let code = py.detach(|| {
+            let code = runtime.block_on(
+                bask_core::cli::Cli::new()
+                    .dataset_opener(|dir| Ok(Arc::new(FileDataset::open(dir)?) as Arc<dyn Dataset>))
+                    .run(builder, argv),
+            );
+            drop(runtime);
+            code
+        });
+        Ok(code)
+    }
+}
+
+impl Engine {
+    /// Build the Rust engine from the accumulated registrations, up to but not including the
+    /// live monitor (chosen per entrypoint). Shared by [`run`](Engine::run) and
+    /// [`cli`](Engine::cli).
+    fn assemble(
+        &self,
+        py: Python<'_>,
+        routers: &Py<PyAny>,
+        dedups: &Py<PyAny>,
+        shutdown: Option<&Py<PyShutdown>>,
+    ) -> bask_core::EngineBuilder {
         let retry = make_retry(
             self.max_attempts,
             self.avoid_failed,
@@ -977,11 +1055,8 @@ impl Engine {
         if self.catch_ctrl_c {
             builder = builder.catch_ctrl_c();
         }
-        if let Some(handle) = &shutdown {
+        if let Some(handle) = shutdown {
             builder = builder.shutdown(handle.borrow(py).inner.clone());
-        }
-        if live {
-            builder = builder.monitor(LiveConsole::new());
         }
         for reg in &self.registrations {
             let worker: Arc<dyn DynWorker> = Arc::new(PyWorker {
@@ -1088,40 +1163,7 @@ impl Engine {
             });
         });
 
-        let engine = builder.build();
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| PyRuntimeError::new_err(format!("tokio runtime: {e}")))?;
-        // Drop the runtime with the GIL released. A graceful shutdown can leave cancelled
-        // `spawn_blocking` workers running; the runtime's drop waits for them and they need
-        // the GIL to finish, so holding it here would deadlock.
-        let report = py
-            .detach(|| {
-                let report = runtime.block_on(engine.run());
-                drop(runtime);
-                report
-            })
-            .map_err(|e| PyRuntimeError::new_err(format!("{e}")))?;
-
-        let dict = PyDict::new(py);
-        dict.set_item("processed", report.stats.processed)?;
-        dict.set_item("retried", report.stats.retried)?;
-        dict.set_item("failed", report.stats.failed)?;
-        dict.set_item("skipped", report.stats.skipped)?;
-        dict.set_item("interrupted", report.interrupted)?;
-        dict.set_item("unfinished", report.unfinished)?;
-        let failures = PyList::empty(py);
-        for failure in &report.failures {
-            let item = PyDict::new(py);
-            item.set_item("task_type", failure.task_type)?;
-            item.set_item("instance", failure.instance.as_str())?;
-            item.set_item("attempts", failure.attempts)?;
-            item.set_item("error", failure.error.as_str())?;
-            failures.append(item)?;
-        }
-        dict.set_item("failures", failures)?;
-        Ok(dict.into_any().unbind())
+        builder
     }
 }
 

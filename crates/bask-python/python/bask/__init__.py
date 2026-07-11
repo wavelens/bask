@@ -248,7 +248,8 @@ class Engine:
         self._sources.append((task, id))
         return self
 
-    def run(self, live: bool = False, shutdown: Shutdown | None = None) -> Report:
+    def _build(self):
+        """Assemble the underlying `_bask.Engine` from the accumulated registrations."""
         from .tasks import Checkpoint
 
         engine = _bask.Engine(
@@ -287,10 +288,25 @@ class Engine:
             engine.source(task, id)
         if self._dataset is not None:
             engine.dataset(getattr(self._dataset, "_dataset", self._dataset))
-        raw = engine.run(self._routers, self._dedups, live, shutdown)
+        return engine
+
+    def run(self, live: bool = False, shutdown: Shutdown | None = None) -> Report:
+        raw = self._build().run(self._routers, self._dedups, live, shutdown)
         outputs = {cls: inst.finalize() for cls, inst in self._routers.items()}
         unique = {marker: len(seen) for marker, seen in self._dedups.items()}
         return Report(raw, outputs, unique)
+
+    def cli(self, argv: list[str] | None = None) -> None:
+        """Run the Rust CLI frontend: `python script.py [list-tasks] [--tasks=NAME] [--json]
+        [--store=..] [--dataset=..] [-j N] [--no-live]`. Forwards `sys.argv` into the same
+        entrypoint the Rust binary uses, then exits with its code -- put it behind
+        `if __name__ == "__main__":`. Argument parsing and rendering are all Rust."""
+        import sys
+
+        code = self._build().cli(
+            self._routers, self._dedups, list(sys.argv if argv is None else argv)
+        )
+        sys.exit(code)
 
 
 def _as_process(target: Any) -> Callable:
