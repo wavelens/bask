@@ -13,6 +13,7 @@ renderer, and exit codes are defined once in Rust.
 import json
 
 import bask
+from bask import Worker
 from bask.tasks import Checkpoint
 
 
@@ -56,19 +57,22 @@ engine = bask.Engine(concurrency=4)
 
 
 @engine.worker(Feed)
-def read(_feed, ctx):
-    for i in range(20):
-        ctx.emit_keyed(i, Line(i))
+class Read(Worker):
+    def process(self, _feed, ctx):
+        for i in range(20):
+            ctx.emit_keyed(i, Line(i))
 
 
 @engine.worker(Line)
-def convert(line, ctx):
-    ctx.emit(Saved(f"row-{line.i}", line.i))
+class Convert(Worker):
+    def process(self, line, ctx):
+        ctx.emit(Saved(f"row-{line.i}", line.i))
 
 
 @engine.worker(Saved)
-def edit(saved, ctx):
-    ctx.emit(Resaved(saved.id, saved.value * 10))
+class Edit(Worker):
+    def process(self, saved, ctx):
+        ctx.emit(Resaved(saved.id, saved.value * 10))
 
 
 engine.source(Feed(), "feed")

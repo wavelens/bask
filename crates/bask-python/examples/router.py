@@ -8,7 +8,7 @@ A second router reduces the per-batch sums into a grand total.
 A Python router implements route(self, value, out) and, for batching, flush(self, out):
 it folds state and may out.emit(task) to route, filter, or batch.
 """
-from bask import Engine
+from bask import Engine, Worker
 
 
 class Reading:
@@ -57,15 +57,17 @@ class Total:
 
 
 @engine.worker(Reading)
-def ingest(reading, ctx):
-    ctx.route(Batcher, reading.n)
+class Ingest(Worker):
+    def process(self, reading, ctx):
+        ctx.route(Batcher, reading.n)
 
 
 @engine.worker(Batch)
-def process(batch, ctx):
-    total = sum(batch.values)
-    print(f"batch of {len(batch.values)} sums to {total}")
-    ctx.route(Total, total)
+class Summarize(Worker):
+    def process(self, batch, ctx):
+        total = sum(batch.values)
+        print(f"batch of {len(batch.values)} sums to {total}")
+        ctx.route(Total, total)
 
 
 for i in range(1, 11):

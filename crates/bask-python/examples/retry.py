@@ -4,7 +4,7 @@
 """Dedup + instance-aware retry. Raw links (with duplicates) are deduped into one
 Fetch per distinct URL; two proxy instances fetch each with failover, and a host
 no proxy can serve exhausts its retries and lands in the failure list."""
-from bask import Engine, Retry
+from bask import Engine, Retry, Worker
 
 
 class Link:
@@ -26,12 +26,13 @@ class SeenUrls:
 
 
 @engine.worker(Link)
-def dedupe(link, ctx):
-    if ctx.first_seen(SeenUrls, link.url):
-        ctx.emit(Fetch(link.url))
+class Dedupe(Worker):
+    def process(self, link, ctx):
+        if ctx.first_seen(SeenUrls, link.url):
+            ctx.emit(Fetch(link.url))
 
 
-class Proxy:
+class Proxy(Worker):
     def __init__(self, name, blocks):
         self.name = name
         self.blocks = blocks

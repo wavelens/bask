@@ -14,6 +14,7 @@ import sqlite3
 import tempfile
 
 import bask
+from bask import Worker
 from bask.data import coverage_rows, coverage_to_bytes
 from bask.tasks import Checkpoint
 
@@ -143,17 +144,20 @@ def main():
     engine = bask.Engine(concurrency=1, dataset=data)
 
     @engine.worker(Feed)
-    def read(_feed, ctx):
-        for i in range(6):
-            ctx.emit_keyed(i, Item(i, i))
+    class Read(Worker):
+        def process(self, _feed, ctx):
+            for i in range(6):
+                ctx.emit_keyed(i, Item(i, i))
 
     @engine.worker(Item)
-    def fold(item, ctx):
-        ctx.emit(Saved(str(item.i), item.value))
+    class Fold(Worker):
+        def process(self, item, ctx):
+            ctx.emit(Saved(str(item.i), item.value))
 
     @engine.worker(Saved)
-    def edit(saved, ctx):
-        ctx.emit(Resaved(saved.id, saved.value * 10))
+    class Edit(Worker):
+        def process(self, saved, ctx):
+            ctx.emit(Resaved(saved.id, saved.value * 10))
 
     engine.source(Feed(), "feed")
     report = engine.run()

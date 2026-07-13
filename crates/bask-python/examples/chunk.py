@@ -6,7 +6,7 @@ into pieces of at most 3 rows by bask_tasks::chunk, each emitted back as a pyarr
 """
 import pyarrow as pa
 
-from bask import Engine
+from bask import Engine, Worker
 from bask.tasks import Batch
 
 
@@ -25,8 +25,9 @@ seen = []
 
 
 @engine.worker(Piece)
-def handle(piece, ctx):
-    seen.append(piece.batch.num_rows)
+class Handle(Worker):
+    def process(self, piece, ctx):
+        seen.append(piece.batch.num_rows)
 
 
 engine.seed(Whole(pa.record_batch({"n": list(range(10))})))

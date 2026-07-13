@@ -10,6 +10,7 @@ import json
 import pytest
 
 import bask
+from bask import Worker
 from bask.tasks import Checkpoint
 
 
@@ -51,18 +52,21 @@ def _engine(reads):
     engine = bask.Engine(concurrency=2)
 
     @engine.worker(Feed)
-    def read(_feed, ctx):
-        reads.append(1)
-        for i in range(6):
-            ctx.emit_keyed(i, Line(i))
+    class Read(Worker):
+        def process(self, _feed, ctx):
+            reads.append(1)
+            for i in range(6):
+                ctx.emit_keyed(i, Line(i))
 
     @engine.worker(Line)
-    def convert(line, ctx):
-        ctx.emit(CliSaved(f"row-{line.i}", line.i))
+    class Convert(Worker):
+        def process(self, line, ctx):
+            ctx.emit(CliSaved(f"row-{line.i}", line.i))
 
     @engine.worker(CliSaved)
-    def edit(saved, ctx):
-        ctx.emit(CliResaved(saved.id, saved.value * 10))
+    class Edit(Worker):
+        def process(self, saved, ctx):
+            ctx.emit(CliResaved(saved.id, saved.value * 10))
 
     engine.source(Feed(), "feed")
     return engine

@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 """Canonical map -> reduce pipeline: split documents into words (emit), count words
 in a separate routing plane."""
-from bask import Engine
+from bask import Engine, Worker
 
 
 class Document:
@@ -20,14 +20,16 @@ engine = Engine()
 
 
 @engine.worker(Document)
-def split(doc, ctx):
-    for word in doc.text.split():
-        ctx.emit(Word(word.lower()))
+class Split(Worker):
+    def process(self, doc, ctx):
+        for word in doc.text.split():
+            ctx.emit(Word(word.lower()))
 
 
 @engine.worker(Word)
-def count(word, ctx):
-    ctx.route(WordCount, word.value)
+class Count(Worker):
+    def process(self, word, ctx):
+        ctx.route(WordCount, word.value)
 
 
 @engine.router

@@ -11,6 +11,7 @@ import tempfile
 import pytest
 
 import bask
+from bask import Worker
 from bask.data import coverage_rows, coverage_to_bytes
 from bask.tasks import Batch, Checkpoint
 
@@ -131,18 +132,21 @@ def _build(data, reads):
     engine = bask.Engine(concurrency=1, dataset=data)
 
     @engine.worker(Feed)
-    def read(_feed, ctx):
-        reads.append(1)
-        for i in range(6):
-            ctx.emit_keyed(i, Item(i))
+    class Read(Worker):
+        def process(self, _feed, ctx):
+            reads.append(1)
+            for i in range(6):
+                ctx.emit_keyed(i, Item(i))
 
     @engine.worker(Item)
-    def fold(item, ctx):
-        ctx.emit(Saved(str(item.i), item.i))
+    class Fold(Worker):
+        def process(self, item, ctx):
+            ctx.emit(Saved(str(item.i), item.i))
 
     @engine.worker(Saved)
-    def edit(saved, ctx):
-        ctx.emit(Resaved(saved.id, saved.value * 10))
+    class Edit(Worker):
+        def process(self, saved, ctx):
+            ctx.emit(Resaved(saved.id, saved.value * 10))
 
     engine.source(Feed(), "feed")
     return engine
@@ -189,14 +193,16 @@ def test_builtin_parquet_dataset(tmp_path):
         engine.row_batch(Groups, Chunk, rows=2)
 
         @engine.worker(Feed)
-        def read(_feed, ctx):
-            reads.append(1)
-            for i in range(5):
-                ctx.emit_keyed(i, Piece(pa.record_batch({"n": [i]})))
+        class Read(Worker):
+            def process(self, _feed, ctx):
+                reads.append(1)
+                for i in range(5):
+                    ctx.emit_keyed(i, Piece(pa.record_batch({"n": [i]})))
 
         @engine.worker(Piece)
-        def fold(piece, ctx):
-            ctx.route(Groups, piece.batch)
+        class Fold(Worker):
+            def process(self, piece, ctx):
+                ctx.route(Groups, piece.batch)
 
         engine.source(Feed(), "feed")
         return engine

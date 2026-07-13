@@ -12,7 +12,7 @@
     flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = { nixpkgs, flake-utils, ... }: flake-utils.lib.eachDefaultSystem (system: let
+  outputs = { self, nixpkgs, flake-utils, ... }@inputs: flake-utils.lib.eachDefaultSystem (system: let
     pkgs = import nixpkgs {
       inherit system;
     };
@@ -26,6 +26,8 @@
       bask = pkgs.callPackage ./nix/packages/bask.nix { };
       default = bask;
     };
+
+    checks = import ./nix/tests { inherit self inputs system pkgs; };
 
     devShells.default = with pkgs; mkShell {
       buildInputs = [

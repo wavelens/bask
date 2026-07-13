@@ -9,7 +9,7 @@ import tempfile
 
 import pyarrow as pa
 
-from bask import Engine
+from bask import Engine, Worker
 from bask.tasks import Batch, Checkpoint
 
 
@@ -35,14 +35,16 @@ def _build(store, reads):
     engine.row_batch(Groups, Group, rows=2)
 
     @engine.worker(Feed)
-    def read(_feed, ctx):
-        reads.append(1)
-        for i in range(5):
-            ctx.emit_keyed(i, Piece(pa.record_batch({"n": [i]})))
+    class Read(Worker):
+        def process(self, _feed, ctx):
+            reads.append(1)
+            for i in range(5):
+                ctx.emit_keyed(i, Piece(pa.record_batch({"n": [i]})))
 
     @engine.worker(Piece)
-    def fold(piece, ctx):
-        ctx.route(Groups, piece.batch)
+    class Fold(Worker):
+        def process(self, piece, ctx):
+            ctx.route(Groups, piece.batch)
 
     engine.source(Feed(), "feed")
     return engine

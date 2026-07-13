@@ -377,10 +377,26 @@ fn coverage_to_bytes<'py>(py: Python<'py>, rows: Vec<u64>) -> Bound<'py, PyBytes
     PyBytes::new(py, &cov.to_bytes())
 }
 
-/// A registered Python worker: a `process(task, ctx)` callable plus the shared
-/// router and dedup registries it feeds.
+/// Invoke a Python lifecycle hook (a bound `on_start`/`on_stop`) off the async threads.
+async fn call_py_hook(hook: Option<Py<PyAny>>) -> anyhow::Result<()> {
+    let Some(hook) = hook else { return Ok(()) };
+    match tokio::task::spawn_blocking(move || {
+        Python::attach(|py| hook.bind(py).call0().map(|_| ()).map_err(|e| e.to_string()))
+    })
+    .await
+    {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(message)) => Err(anyhow::anyhow!(message)),
+        Err(join) => Err(anyhow::anyhow!("worker hook thread panicked: {join}")),
+    }
+}
+
+/// A registered Python worker: a `process(task, ctx)` callable, its optional
+/// `on_start`/`on_stop` hooks, plus the shared router and dedup registries it feeds.
 struct PyWorker {
     process: Py<PyAny>,
+    on_start: Option<Py<PyAny>>,
+    on_stop: Option<Py<PyAny>>,
     routers: Py<PyAny>,
     dedups: Py<PyAny>,
 }
@@ -447,6 +463,16 @@ impl DynWorker for PyWorker {
             }
             Err(join) => Err(anyhow::anyhow!("worker thread panicked: {join}")),
         }
+    }
+
+    async fn on_start(&self) -> anyhow::Result<()> {
+        let hook = Python::attach(|py| self.on_start.as_ref().map(|f| f.clone_ref(py)));
+        call_py_hook(hook).await
+    }
+
+    async fn on_stop(&self) -> anyhow::Result<()> {
+        let hook = Python::attach(|py| self.on_stop.as_ref().map(|f| f.clone_ref(py)));
+        call_py_hook(hook).await
     }
 }
 
@@ -699,6 +725,8 @@ struct Registration {
     key: u64,
     type_name: &'static str,
     process: Py<PyAny>,
+    on_start: Option<Py<PyAny>>,
+    on_stop: Option<Py<PyAny>>,
     label: Option<String>,
     concurrency: Option<usize>,
     timeout_ms: Option<u64>,
@@ -896,13 +924,15 @@ impl Engine {
         Ok(())
     }
 
-    #[pyo3(signature = (task_cls, process, label=None, concurrency=None, timeout_ms=None, attrs=None, requires=None, retry=None))]
+    #[pyo3(signature = (task_cls, process, on_start=None, on_stop=None, label=None, concurrency=None, timeout_ms=None, attrs=None, requires=None, retry=None))]
     #[allow(clippy::too_many_arguments)]
     fn register(
         &mut self,
         py: Python<'_>,
         task_cls: Py<PyAny>,
         process: Py<PyAny>,
+        on_start: Option<Py<PyAny>>,
+        on_stop: Option<Py<PyAny>>,
         label: Option<String>,
         concurrency: Option<usize>,
         timeout_ms: Option<u64>,
@@ -915,6 +945,8 @@ impl Engine {
             key,
             type_name: intern(key, &name),
             process,
+            on_start,
+            on_stop,
             label,
             concurrency,
             timeout_ms,
@@ -1061,6 +1093,8 @@ impl Engine {
         for reg in &self.registrations {
             let worker: Arc<dyn DynWorker> = Arc::new(PyWorker {
                 process: reg.process.clone_ref(py),
+                on_start: reg.on_start.as_ref().map(|f| f.clone_ref(py)),
+                on_stop: reg.on_stop.as_ref().map(|f| f.clone_ref(py)),
                 routers: routers.clone_ref(py),
                 dedups: dedups.clone_ref(py),
             });

@@ -5,7 +5,7 @@
 and draw from a shared `gpu` pool; a job too large for the a100 raises different_attr("gpu")
 and is retried on the h100, while a job with no data raises Fatal and lands in the sink.
 """
-from bask import Engine, Retry, Fatal, different_attr
+from bask import Engine, Retry, Fatal, Worker, different_attr
 
 
 class TrainJob:
@@ -14,7 +14,7 @@ class TrainJob:
         self.size_gb = size_gb
 
 
-class Trainer:
+class Trainer(Worker):
     def __init__(self, kind, vram_gb):
         self.kind = kind
         self.vram_gb = vram_gb

@@ -7,7 +7,7 @@ Subclass `Batch` to get a distinct routing type carrying a pyarrow RecordBatch, 
 the stage with `Engine.chunker(source_cls, piece_cls, rows)`:
 
     import pyarrow as pa
-    from bask import Engine
+    from bask import Engine, Worker
     from bask.tasks import Batch
 
     class Whole(Batch): pass
@@ -17,8 +17,9 @@ the stage with `Engine.chunker(source_cls, piece_cls, rows)`:
     engine.chunker(Whole, Piece, rows=8192)
 
     @engine.worker(Piece)
-    def handle(piece, ctx):
-        piece.batch  # a pyarrow RecordBatch of <= 8192 rows
+    class Handle(Worker):
+        def process(self, piece, ctx):
+            piece.batch  # a pyarrow RecordBatch of <= 8192 rows
 
     engine.seed(Whole(pa.record_batch({"n": range(100_000)})))
     engine.run()

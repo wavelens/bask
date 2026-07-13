@@ -17,6 +17,7 @@ from ._bask import Shutdown
 
 __all__ = [
     "Engine",
+    "Worker",
     "Retry",
     "Report",
     "Shutdown",
@@ -72,6 +73,22 @@ def different_attr(key: str, message: str = "") -> Retryable:
     return Retryable(("different_attr", key), message)
 
 
+class Worker:
+    """A unit of the compute plane: consumes one task type via `process(task, ctx)` and may
+    emit more. Override `on_start`/`on_stop` for per-instance setup and teardown (open a
+    client, authenticate); both default to a no-op, mirroring the Rust `Worker` trait.
+    Register a subclass with `@engine.worker(TaskType)` or `engine.register(TaskType, MyWorker(...))`."""
+
+    def on_start(self) -> None:
+        pass
+
+    def on_stop(self) -> None:
+        pass
+
+    def process(self, task: Any, ctx: Any) -> None:
+        raise NotImplementedError("a Worker must define process(task, ctx)")
+
+
 class Report:
     """Outcome of a run: router outputs, counters, and terminal failures."""
 
@@ -105,6 +122,8 @@ class Report:
 class _Registration:
     task_cls: type
     process: Callable
+    on_start: Callable | None
+    on_stop: Callable | None
     label: str | None
     concurrency: int | None
     timeout_ms: int | None
@@ -164,9 +183,10 @@ class Engine:
         draws a permit from; `retry` overrides the engine default for this instance."""
 
         def decorate(target):
+            process, on_start, on_stop = _as_worker(target)
             self._registrations.append(
                 _Registration(
-                    task_cls, _as_process(target), label, concurrency, timeout_ms, attrs, requires, retry
+                    task_cls, process, on_start, on_stop, label, concurrency, timeout_ms, attrs, requires, retry
                 )
             )
             return target
@@ -186,9 +206,10 @@ class Engine:
         retry: Retry | None = None,
     ):
         """Register a pre-built worker instance (for groups with distinct params)."""
+        process, on_start, on_stop = _as_worker(instance)
         self._registrations.append(
             _Registration(
-                task_cls, _as_process(instance), label, concurrency, timeout_ms, attrs, requires, retry
+                task_cls, process, on_start, on_stop, label, concurrency, timeout_ms, attrs, requires, retry
             )
         )
         return instance
@@ -271,6 +292,8 @@ class Engine:
             engine.register(
                 reg.task_cls,
                 reg.process,
+                reg.on_start,
+                reg.on_stop,
                 reg.label,
                 reg.concurrency,
                 reg.timeout_ms,
@@ -309,10 +332,12 @@ class Engine:
         sys.exit(code)
 
 
-def _as_process(target: Any) -> Callable:
-    """Normalize a worker to a `process(task, ctx)` callable."""
+def _as_worker(target: Any) -> tuple[Callable, Callable | None, Callable | None]:
+    """Normalize a worker to its `(process, on_start, on_stop)` callables, instantiating a
+    class once. A worker must expose `process(task, ctx)`; the lifecycle hooks are optional."""
     if isinstance(target, type):
         target = target()
-    if hasattr(target, "process"):
-        return target.process
-    return target
+    process = getattr(target, "process", None)
+    if process is None:
+        raise TypeError(f"worker {target!r} must define process(task, ctx)")
+    return process, getattr(target, "on_start", None), getattr(target, "on_stop", None)

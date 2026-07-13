@@ -6,7 +6,7 @@ two instances each. Run in a terminal to watch queue depth and per-type
 concurrency update in place."""
 import time
 
-from bask import Engine
+from bask import Engine, Worker
 
 MAX_DEPTH = 3
 FANOUT = 4
@@ -25,23 +25,25 @@ class Render:
 engine = Engine(concurrency=6, sample_interval_ms=120)
 
 
-def crawler(page, ctx):
-    time.sleep(0.03)  # simulate fetching
-    ctx.emit(Render())
-    if page.depth < MAX_DEPTH:
-        for i in range(FANOUT):
-            ctx.emit(Page(page.id * FANOUT + i, page.depth + 1))
+class Crawler(Worker):
+    def process(self, page, ctx):
+        time.sleep(0.03)  # simulate fetching
+        ctx.emit(Render())
+        if page.depth < MAX_DEPTH:
+            for i in range(FANOUT):
+                ctx.emit(Page(page.id * FANOUT + i, page.depth + 1))
 
 
-def renderer(render, ctx):
-    time.sleep(0.05)  # simulate rendering
-    ctx.route(Rendered, 1)
+class Renderer(Worker):
+    def process(self, render, ctx):
+        time.sleep(0.05)  # simulate rendering
+        ctx.route(Rendered, 1)
 
 
-engine.register(Page, crawler, label="crawler-1", concurrency=2)
-engine.register(Page, crawler, label="crawler-2", concurrency=2)
-engine.register(Render, renderer, label="renderer-1", concurrency=2)
-engine.register(Render, renderer, label="renderer-2", concurrency=2)
+engine.register(Page, Crawler(), label="crawler-1", concurrency=2)
+engine.register(Page, Crawler(), label="crawler-2", concurrency=2)
+engine.register(Render, Renderer(), label="renderer-1", concurrency=2)
+engine.register(Render, Renderer(), label="renderer-2", concurrency=2)
 
 
 @engine.router

@@ -8,7 +8,7 @@ covered and skips it whole (no re-read), the same as the Rust engine.
 import os
 import tempfile
 
-from bask import Engine
+from bask import Engine, Worker
 from bask.tasks import Checkpoint
 
 
@@ -37,14 +37,16 @@ def build() -> Engine:
     engine = Engine(concurrency=1, store=store)
 
     @engine.worker(Feed)
-    def read(feed, ctx):
-        print("  reading source")
-        for i in range(8):
-            ctx.emit_keyed(i, Row(i))
+    class Read(Worker):
+        def process(self, feed, ctx):
+            print("  reading source")
+            for i in range(8):
+                ctx.emit_keyed(i, Row(i))
 
     @engine.worker(Row)
-    def fetch(row, ctx):
-        ctx.emit(Saved(row.id, f"row-{row.id}"))
+    class Fetch(Worker):
+        def process(self, row, ctx):
+            ctx.emit(Saved(row.id, f"row-{row.id}"))
 
     engine.source(Feed(), "feed")
     return engine

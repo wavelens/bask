@@ -14,7 +14,7 @@ import json
 import os
 import tempfile
 
-from bask import Engine
+from bask import Engine, Worker
 
 
 class ReadCsv:
@@ -34,24 +34,26 @@ engine = Engine()
 
 
 @engine.worker(ReadCsv)
-def read_csv(task, ctx):
-    batch = []
-    with open(task.path, newline="") as handle:
-        for row in csv.DictReader(handle):
-            batch.append(row)
-            if len(batch) >= task.batch_rows:
-                ctx.emit(WriteBatch(task.out, batch))
-                batch = []
-    if batch:
-        ctx.emit(WriteBatch(task.out, batch))
+class Reader(Worker):
+    def process(self, task, ctx):
+        batch = []
+        with open(task.path, newline="") as handle:
+            for row in csv.DictReader(handle):
+                batch.append(row)
+                if len(batch) >= task.batch_rows:
+                    ctx.emit(WriteBatch(task.out, batch))
+                    batch = []
+        if batch:
+            ctx.emit(WriteBatch(task.out, batch))
 
 
 # concurrency=1 so appends from concurrent batches never interleave.
 @engine.worker(WriteBatch, concurrency=1)
-def write_batch(task, ctx):
-    with open(task.out, "a") as handle:
-        for row in task.rows:
-            handle.write(json.dumps(row) + "\n")
+class Writer(Worker):
+    def process(self, task, ctx):
+        with open(task.out, "a") as handle:
+            for row in task.rows:
+                handle.write(json.dumps(row) + "\n")
 
 
 workdir = tempfile.mkdtemp(prefix="bask_io_convert_")

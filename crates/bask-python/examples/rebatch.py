@@ -7,7 +7,7 @@ rows by the row_batch router (the trailing group flushes at end-of-run).
 """
 import pyarrow as pa
 
-from bask import Engine
+from bask import Engine, Worker
 from bask.tasks import Batch
 
 
@@ -35,13 +35,15 @@ seen = []
 
 
 @engine.worker(Piece)
-def feed(piece, ctx):
-    ctx.route(Groups, piece.batch)
+class Feed(Worker):
+    def process(self, piece, ctx):
+        ctx.route(Groups, piece.batch)
 
 
 @engine.worker(Group)
-def handle(group, ctx):
-    seen.append(group.batch.num_rows)
+class Handle(Worker):
+    def process(self, group, ctx):
+        seen.append(group.batch.num_rows)
 
 
 engine.seed(Whole(pa.record_batch({"n": list(range(250))})))
