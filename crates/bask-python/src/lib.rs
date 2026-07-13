@@ -849,6 +849,28 @@ struct StreamHandle {
     shutdown: Shutdown,
 }
 
+impl StreamHandle {
+    /// Join the run thread; if it panicked, record an error outcome so iteration and
+    /// `report` surface it instead of ending as a silent stop.
+    fn join_thread(&mut self, py: Python<'_>) {
+        if let Some(handle) = self.thread.take() {
+            let panicked = py.detach(|| handle.join()).is_err();
+            if panicked {
+                let mut guard = self.outcome.lock().unwrap();
+                if guard.is_none() {
+                    *guard = Some(Err("stream thread panicked".to_owned()));
+                }
+            }
+        }
+    }
+}
+
+impl Drop for StreamHandle {
+    fn drop(&mut self) {
+        self.shutdown.trigger();
+    }
+}
+
 #[pymethods]
 impl StreamHandle {
     fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
@@ -865,9 +887,7 @@ impl StreamHandle {
         }
         // Channel closed: the run finished. Join so the outcome is set, then surface it.
         slf.rx = None;
-        if let Some(handle) = slf.thread.take() {
-            let _ = py.detach(|| handle.join());
-        }
+        slf.join_thread(py);
         match &*slf.outcome.lock().unwrap() {
             Some(Err(message)) => Err(PyRuntimeError::new_err(message.clone())),
             _ => Ok(None),
@@ -877,9 +897,7 @@ impl StreamHandle {
     fn close(&mut self, py: Python<'_>) {
         self.shutdown.trigger();
         self.rx = None;
-        if let Some(handle) = self.thread.take() {
-            let _ = py.detach(|| handle.join());
-        }
+        self.join_thread(py);
     }
 
     fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
