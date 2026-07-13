@@ -29,6 +29,10 @@ in python3.pkgs.buildPythonPackage {
 
   pythonImportsCheck = [ "bask" ];
 
+  optional-dependencies = {
+    torch = with python3.pkgs; [ torch pyarrow numpy ];
+  };
+
   meta = {
     license = with lib.licenses; [ mit asl20 ];
     platforms = lib.platforms.unix;
