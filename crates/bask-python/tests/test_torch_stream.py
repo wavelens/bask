@@ -97,3 +97,43 @@ def test_loader_accepts_explicit_zero_workers():
 
     dl = loader(TaskStream(_arrow_engine(8, 8)), num_workers=0)
     assert isinstance(dl, DataLoader)
+
+
+def test_hybrid_epoch0_live_then_snapshot_replay(tmp_path):
+    from bask.data import BatchCheckpoint, Dataset
+    from bask.torch import SnapshotTaskSet
+
+    class SampleShard(BatchCheckpoint):
+        def key(self):
+            return str(self.batch.column("x")[0].as_py())
+
+    data = Dataset(str(tmp_path / "out"))
+    engine = bask.Engine(concurrency=2, dataset=data)
+
+    @engine.worker(Feed)
+    class Emit(Worker):
+        def process(self, _feed, ctx):
+            for start in range(0, 64, 8):
+                batch = pa.record_batch({"x": list(range(start, start + 8))})
+                ctx.emit_keyed(start, SampleShard(batch))
+
+    engine.collect(SampleShard)
+    engine.source(Feed(), "feed")
+
+    stream = TaskStream(engine, snapshot=data, seed=3)
+
+    epoch0 = []
+    for tensors in loader(stream):
+        epoch0.extend(tensors["x"].tolist())
+    assert sorted(epoch0) == list(range(64))
+
+    epoch1 = []
+    for tensors in loader(stream):
+        epoch1.extend(tensors["x"].tolist())
+    assert sorted(epoch1) == list(range(64)), "replay yields the same multiset"
+
+    reopened = Dataset(str(tmp_path / "out"))
+    mapset = SnapshotTaskSet(reopened)
+    assert len(mapset) == 8
+    rows = [v for i in range(len(mapset)) for v in mapset[i]["x"].tolist()]
+    assert sorted(rows) == list(range(64))
