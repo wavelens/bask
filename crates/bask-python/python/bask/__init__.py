@@ -166,6 +166,7 @@ class Engine:
         self._dedups: dict[type, set] = {}
         self._seeds: list[Any] = []
         self._sources: list[tuple[Any, str]] = []
+        self._collectors: list[type] = []
 
     def worker(
         self,
@@ -269,6 +270,19 @@ class Engine:
         self._sources.append((task, id))
         return self
 
+    def collect(self, task_cls: type) -> "Engine":
+        """Designate `task_cls` as a training output drained by `stream()`. The type is
+        terminal: do not also register a worker for it. Combine with a `Checkpoint`
+        subclass and `Engine(dataset=...)` to snapshot the stream for shuffled replay."""
+        self._collectors.append(task_cls)
+        return self
+
+    def stream(self, capacity: int = 1024, live: bool = False):
+        """Run the engine on a background thread and return a `StreamHandle` iterator that
+        yields collected tasks as they are produced. See `bask.torch.TaskStream` to consume
+        it as a PyTorch DataLoader."""
+        return self._build().stream(self._routers, self._dedups, capacity, live)
+
     def _build(self):
         """Assemble the underlying `_bask.Engine` from the accumulated registrations."""
         from .tasks import Checkpoint
@@ -309,6 +323,8 @@ class Engine:
             engine.seed(task)
         for task, id in self._sources:
             engine.source(task, id)
+        for task_cls in self._collectors:
+            engine.collect(task_cls)
         if self._dataset is not None:
             engine.dataset(getattr(self._dataset, "_dataset", self._dataset))
         return engine
