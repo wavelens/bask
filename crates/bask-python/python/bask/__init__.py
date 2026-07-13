@@ -323,6 +323,10 @@ class Engine:
             engine.seed(task)
         for task, id in self._sources:
             engine.source(task, id)
+        overlap = set(self._collectors) & {reg.task_cls for reg in self._registrations}
+        if overlap:
+            names = ", ".join(sorted(cls.__name__ for cls in overlap))
+            raise ValueError(f"collected type is terminal and cannot also have a worker: {names}")
         for task_cls in self._collectors:
             engine.collect(task_cls)
         if self._dataset is not None:

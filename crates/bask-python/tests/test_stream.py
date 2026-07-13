@@ -64,3 +64,20 @@ def test_stream_requires_collect():
         assert False, "expected RuntimeError"
     except RuntimeError:
         pass
+
+
+def test_collect_and_worker_overlap_rejected():
+    engine = bask.Engine(concurrency=1)
+
+    @engine.worker(Sample)
+    class Handle(Worker):
+        def process(self, sample, ctx):
+            pass
+
+    engine.collect(Sample)
+    engine.seed(Feed())
+    try:
+        engine.stream()
+        assert False, "expected ValueError for collect+worker overlap"
+    except ValueError:
+        pass
