@@ -20,8 +20,8 @@ use arrow::pyarrow::{FromPyArrow, ToPyArrow};
 use arrow::record_batch::RecordBatch;
 use bask_core::{
     Backoff, Cancellation, CheckpointOps, Committed, Context, Coverage, Dataset, DeadLetter,
-    DeadLetterSink, DynWorker, Emitter, LiveConsole, RetryExt, RetryOn, RetryPolicy, Shutdown,
-    SqliteStore, Status, Store, StoredItem, WorkerCfg,
+    DeadLetterSink, DynWorker, Emitter, LiveConsole, RetryExt, RetryOn, RetryPolicy, RunReport,
+    Shutdown, SqliteStore, Status, Store, StoredItem, WorkerCfg,
 };
 use bask_io::FileDataset;
 
@@ -787,6 +787,127 @@ impl PyShutdown {
     }
 }
 
+/// A terminal worker that forwards each collected task to the streaming consumer over a
+/// bounded channel; a closed channel means the consumer stopped, so the task is dropped.
+struct CollectorSink {
+    tx: tokio::sync::mpsc::Sender<Py<PyAny>>,
+}
+
+#[async_trait]
+impl DynWorker for CollectorSink {
+    async fn process(
+        &self,
+        payload: &(dyn Any + Send + Sync),
+        _ctx: &Context,
+    ) -> anyhow::Result<()> {
+        let obj = Python::attach(|py| {
+            payload
+                .downcast_ref::<Py<PyAny>>()
+                .expect("python payload")
+                .clone_ref(py)
+        });
+        let _ = self.tx.send(obj).await;
+        Ok(())
+    }
+}
+
+/// One task type designated as a training output by `Engine.collect`.
+struct CollectorReg {
+    key: u64,
+    type_name: &'static str,
+}
+
+/// Render a `RunReport` as the dict `Engine.run` and `StreamHandle.report` both return.
+fn report_dict(py: Python<'_>, report: &RunReport) -> PyResult<Py<PyAny>> {
+    let dict = PyDict::new(py);
+    dict.set_item("processed", report.stats.processed)?;
+    dict.set_item("retried", report.stats.retried)?;
+    dict.set_item("failed", report.stats.failed)?;
+    dict.set_item("skipped", report.stats.skipped)?;
+    dict.set_item("interrupted", report.interrupted)?;
+    dict.set_item("unfinished", report.unfinished)?;
+    let failures = PyList::empty(py);
+    for failure in &report.failures {
+        let item = PyDict::new(py);
+        item.set_item("task_type", failure.task_type)?;
+        item.set_item("instance", failure.instance.as_str())?;
+        item.set_item("attempts", failure.attempts)?;
+        item.set_item("error", failure.error.as_str())?;
+        failures.append(item)?;
+    }
+    dict.set_item("failures", failures)?;
+    Ok(dict.into_any().unbind())
+}
+
+/// A live view of a running engine: `__next__` blocks with the GIL released until the next
+/// collected task arrives, `StopIteration` at quiescence, and re-raises an engine error.
+#[pyclass]
+struct StreamHandle {
+    rx: Option<tokio::sync::mpsc::Receiver<Py<PyAny>>>,
+    outcome: Arc<Mutex<Option<Result<RunReport, String>>>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    shutdown: Shutdown,
+}
+
+#[pymethods]
+impl StreamHandle {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(mut slf: PyRefMut<'_, Self>, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let received = match slf.rx.as_mut() {
+            Some(rx) => py.detach(|| rx.blocking_recv()),
+            None => None,
+        };
+        if let Some(obj) = received {
+            return Ok(Some(obj));
+        }
+        // Channel closed: the run finished. Join so the outcome is set, then surface it.
+        slf.rx = None;
+        if let Some(handle) = slf.thread.take() {
+            let _ = py.detach(|| handle.join());
+        }
+        match &*slf.outcome.lock().unwrap() {
+            Some(Err(message)) => Err(PyRuntimeError::new_err(message.clone())),
+            _ => Ok(None),
+        }
+    }
+
+    fn close(&mut self, py: Python<'_>) {
+        self.shutdown.trigger();
+        self.rx = None;
+        if let Some(handle) = self.thread.take() {
+            let _ = py.detach(|| handle.join());
+        }
+    }
+
+    fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    #[pyo3(signature = (_exc_type=None, _exc_val=None, _exc_tb=None))]
+    fn __exit__(
+        &mut self,
+        py: Python<'_>,
+        _exc_type: Option<Py<PyAny>>,
+        _exc_val: Option<Py<PyAny>>,
+        _exc_tb: Option<Py<PyAny>>,
+    ) -> bool {
+        self.close(py);
+        false
+    }
+
+    #[getter]
+    fn report(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        match &*self.outcome.lock().unwrap() {
+            Some(Ok(report)) => Ok(Some(report_dict(py, report)?)),
+            Some(Err(message)) => Err(PyRuntimeError::new_err(message.clone())),
+            None => Ok(None),
+        }
+    }
+}
+
 /// Accumulates registrations, then runs the Rust engine with Python workers.
 #[pyclass]
 struct Engine {
@@ -808,6 +929,7 @@ struct Engine {
     chunkers: Vec<ChunkerReg>,
     checkpoints: Vec<CheckpointReg>,
     seeds: Vec<Seed>,
+    collectors: Vec<CollectorReg>,
 }
 
 #[pymethods]
@@ -849,6 +971,7 @@ impl Engine {
             chunkers: Vec::new(),
             checkpoints: Vec::new(),
             seeds: Vec::new(),
+            collectors: Vec::new(),
         }
     }
 
@@ -969,6 +1092,74 @@ impl Engine {
         Ok(())
     }
 
+    /// Designate `task_cls` as a training output drained by `stream()`. Its instances are
+    /// forwarded to the streaming consumer by a terminal sink instead of a worker; the type
+    /// must not also have its own worker. Pair with a `Checkpoint` subclass and
+    /// `Engine(dataset=...)` to snapshot the same stream to Parquet.
+    fn collect(&mut self, py: Python<'_>, task_cls: Py<PyAny>) -> PyResult<()> {
+        let (key, name) = class_key_name(task_cls.bind(py))?;
+        self.collectors.push(CollectorReg {
+            key,
+            type_name: intern(key, &name),
+        });
+        Ok(())
+    }
+
+    /// Run the engine on a background thread and return a `StreamHandle` at once. Collected
+    /// tasks flow over a bounded channel of `capacity`, so a fast engine backpressures onto
+    /// the consumer instead of growing memory.
+    #[pyo3(signature = (routers, dedups, capacity=1024, live=false))]
+    fn stream(
+        &self,
+        py: Python<'_>,
+        routers: Py<PyAny>,
+        dedups: Py<PyAny>,
+        capacity: usize,
+        live: bool,
+    ) -> PyResult<StreamHandle> {
+        if self.collectors.is_empty() {
+            return Err(PyRuntimeError::new_err(
+                "engine.collect(TaskType) must be called before stream()",
+            ));
+        }
+        let mut builder = self.assemble(py, &routers, &dedups, None);
+        if live {
+            builder = builder.monitor(LiveConsole::new());
+        }
+        let shutdown = Shutdown::new();
+        builder = builder.shutdown(shutdown.clone());
+        let (tx, rx) = tokio::sync::mpsc::channel::<Py<PyAny>>(capacity.max(1));
+        for reg in &self.collectors {
+            let sink: Arc<dyn DynWorker> = Arc::new(CollectorSink { tx: tx.clone() });
+            builder = builder.worker_dyn(reg.key, sink, reg.type_name, WorkerCfg::new().concurrency(1));
+        }
+        drop(tx);
+        let outcome = Arc::new(Mutex::new(None));
+        let outcome_bg = Arc::clone(&outcome);
+        let thread = std::thread::Builder::new()
+            .name("bask-stream".to_owned())
+            .spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+                    Ok(runtime) => runtime,
+                    Err(e) => {
+                        *outcome_bg.lock().unwrap() = Some(Err(format!("tokio runtime: {e}")));
+                        return;
+                    }
+                };
+                let engine = builder.build();
+                let result = runtime.block_on(engine.run());
+                *outcome_bg.lock().unwrap() = Some(result.map_err(|e| e.to_string()));
+                drop(runtime);
+            })
+            .map_err(|e| PyRuntimeError::new_err(format!("spawn stream thread: {e}")))?;
+        Ok(StreamHandle {
+            rx: Some(rx),
+            outcome,
+            thread: Some(thread),
+            shutdown,
+        })
+    }
+
     #[pyo3(signature = (routers, dedups, live=false, shutdown=None))]
     fn run(
         &self,
@@ -998,24 +1189,7 @@ impl Engine {
             })
             .map_err(|e| PyRuntimeError::new_err(format!("{e}")))?;
 
-        let dict = PyDict::new(py);
-        dict.set_item("processed", report.stats.processed)?;
-        dict.set_item("retried", report.stats.retried)?;
-        dict.set_item("failed", report.stats.failed)?;
-        dict.set_item("skipped", report.stats.skipped)?;
-        dict.set_item("interrupted", report.interrupted)?;
-        dict.set_item("unfinished", report.unfinished)?;
-        let failures = PyList::empty(py);
-        for failure in &report.failures {
-            let item = PyDict::new(py);
-            item.set_item("task_type", failure.task_type)?;
-            item.set_item("instance", failure.instance.as_str())?;
-            item.set_item("attempts", failure.attempts)?;
-            item.set_item("error", failure.error.as_str())?;
-            failures.append(item)?;
-        }
-        dict.set_item("failures", failures)?;
-        Ok(dict.into_any().unbind())
+        report_dict(py, &report)
     }
 
     /// Drive the Rust CLI frontend over this engine, forwarding `argv`: `run`/`list-tasks`/
@@ -1207,6 +1381,7 @@ fn _bask(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyShutdown>()?;
     m.add_class::<RowAggregator>()?;
     m.add_class::<PyFileDataset>()?;
+    m.add_class::<StreamHandle>()?;
     m.add_function(wrap_pyfunction!(coverage_rows, m)?)?;
     m.add_function(wrap_pyfunction!(coverage_to_bytes, m)?)?;
     Ok(())

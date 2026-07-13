@@ -15,7 +15,7 @@ bask-core = { workspace = true, features = ["cli"] }
 bask-tasks.workspace = true
 bask-io = { workspace = true, features = ["dataset"] }
 pyo3 = { version = "0.29", features = ["abi3-py39"] }
-tokio = { version = "1", features = ["rt-multi-thread"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
 async-trait = "0.1"
 arrow = { version = "59", features = ["pyarrow"] }
 anyhow = "1"
