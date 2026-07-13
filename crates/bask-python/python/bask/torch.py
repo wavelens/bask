@@ -147,7 +147,7 @@ def loader(source, *, batch_size=None, **kw) -> DataLoader:
     defaults to None because bask already batches; set it only for a per-sample stream. With
     batch_size=None, torch's own default collate would coerce a decoded tuple into a list, so
     the default collate_fn here is identity unless the caller overrides it."""
-    if kw.get("num_workers"):
+    if kw.pop("num_workers", 0):
         raise ValueError(
             "bask owns data-loading parallelism; keep num_workers=0 and set engine concurrency"
         )
