@@ -84,3 +84,16 @@ def test_shuffle_buffer_preserves_multiset():
     for tensors in loader(stream):
         seen.extend(tensors["x"].tolist())
     assert sorted(seen) == list(range(64))
+
+
+def test_loader_rejects_torch_workers():
+    stream = TaskStream(_arrow_engine(8, 8))
+    with pytest.raises(ValueError):
+        loader(stream, num_workers=2)
+
+
+def test_loader_accepts_explicit_zero_workers():
+    from torch.utils.data import DataLoader
+
+    dl = loader(TaskStream(_arrow_engine(8, 8)), num_workers=0)
+    assert isinstance(dl, DataLoader)
