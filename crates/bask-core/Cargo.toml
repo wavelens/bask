@@ -24,7 +24,8 @@ blake3 = { version = "1", optional = true }
 
 [features]
 default = ["checkpoint", "cli"]
-checkpoint = ["dep:bask-macros", "dep:serde", "dep:serde_json", "dep:inventory", "dep:rusqlite", "dep:blake3"]
+macros = ["dep:bask-macros", "dep:inventory"]
+checkpoint = ["macros", "dep:serde", "dep:serde_json", "dep:rusqlite", "dep:blake3"]
 cli = ["checkpoint"]
 
 [dev-dependencies]

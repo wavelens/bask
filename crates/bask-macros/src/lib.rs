@@ -10,7 +10,9 @@
 use proc_macro::TokenStream;
 use proc_macro_crate::{FoundCrate, crate_name};
 use quote::{format_ident, quote};
-use syn::{Data, DeriveInput, Fields, LitStr, parse_macro_input};
+use syn::{
+    Data, DeriveInput, Fields, LitStr, Token, Type, parse_macro_input, punctuated::Punctuated,
+};
 
 /// Resolve the crate root that re-exports `Checkpoint`/`CheckpointInfo`/`inventory`,
 /// preferring the `bask` umbrella and falling back to `bask-core`, so the derive works
@@ -116,4 +118,38 @@ fn key_field(data: &Data) -> syn::Result<proc_macro2::Ident> {
             "Checkpoint allows only one `#[key]` field",
         )),
     }
+}
+
+/// Derive `bask::EmitPolicy` from a `#[emits(TypeA, TypeB, ...)]` list. Generates the
+/// trait impl and registers the type with the engine so no builder call is needed.
+#[proc_macro_derive(EmitPolicy, attributes(emits))]
+pub fn derive_emit_policy(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let ty = &input.ident;
+
+    let mut targets: Vec<Type> = Vec::new();
+    for attr in &input.attrs {
+        if !attr.path().is_ident("emits") {
+            continue;
+        }
+        match attr.parse_args_with(Punctuated::<Type, Token![,]>::parse_terminated) {
+            Ok(list) => targets.extend(list),
+            Err(err) => return err.into_compile_error().into(),
+        }
+    }
+
+    let (impl_g, ty_g, where_g) = input.generics.split_for_impl();
+    let root = bask_root();
+
+    quote! {
+        impl #impl_g #root::EmitPolicy for #ty #ty_g #where_g {
+            fn declare(allow: &mut #root::Allow) {
+                #( allow.allow::<#targets>(); )*
+            }
+        }
+        #root::inventory::submit! {
+            #root::EmitPolicyInfo::of::<#ty #ty_g>()
+        }
+    }
+    .into()
 }
