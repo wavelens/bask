@@ -421,6 +421,7 @@ pub(crate) async fn run(
             break;
         }
         let mut out = Emit::default();
+        // Router-buffered flush emissions intentionally bypass the emit-policy check (out of scope by design).
         routers.flush_all(&mut out);
         if let Some(hook) = flush_hook.as_mut() {
             hook(&mut out);
