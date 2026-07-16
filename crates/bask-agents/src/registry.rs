@@ -59,7 +59,10 @@ fn schema_of<T: schemars::JsonSchema>() -> serde_json::Value {
     serde_json::to_value(schemars::schema_for!(T)).unwrap_or(serde_json::Value::Null)
 }
 
-fn emit_of<T: AgentTask>(ctx: &Context, args: serde_json::Value) -> BoxFuture<'_, anyhow::Result<()>> {
+fn emit_of<T: AgentTask>(
+    ctx: &Context,
+    args: serde_json::Value,
+) -> BoxFuture<'_, anyhow::Result<()>> {
     Box::pin(async move {
         let task: T = serde_json::from_value(args)?;
         ctx.emit(task).await?;
@@ -105,10 +108,15 @@ mod tests {
 
     #[test]
     fn registry_resolves_registered_task() {
-        let entry = registry().get(&TypeId::of::<Ping>()).expect("Ping registered");
+        let entry = registry()
+            .get(&TypeId::of::<Ping>())
+            .expect("Ping registered");
         assert_eq!(entry.name, "Ping");
         assert_eq!(entry.description, None);
-        let props = entry.schema.get("properties").expect("schema has properties");
+        let props = entry
+            .schema
+            .get("properties")
+            .expect("schema has properties");
         assert!(props.get("message").is_some());
     }
 }

@@ -172,8 +172,13 @@ impl<Src: EmitPolicy + Serialize> AgentBuilder<Src> {
                 name: entry.name,
                 message: err.to_string(),
             })?;
-            openai_tools.push(ChatCompletionTools::Function(ChatCompletionTool { function }));
-            tools.push(ResolvedTool { name: entry.name, emit: entry.emit });
+            openai_tools.push(ChatCompletionTools::Function(ChatCompletionTool {
+                function,
+            }));
+            tools.push(ResolvedTool {
+                name: entry.name,
+                emit: entry.emit,
+            });
         }
 
         let model = self.model.unwrap_or_else(|| self.defaults.model.clone());
@@ -245,6 +250,7 @@ impl<Src: EmitPolicy + Serialize> Worker for Agent<Src> {
         };
 
         if let Some(calls) = choice.message.tool_calls {
+            let mut pending: Vec<(EmitFn, serde_json::Value)> = Vec::new();
             for call in calls {
                 let ChatCompletionMessageToolCalls::Function(function) = call else {
                     continue;
@@ -257,7 +263,10 @@ impl<Src: EmitPolicy + Serialize> Worker for Agent<Src> {
                         anyhow::anyhow!("model called unknown tool {}", function.function.name)
                     })?;
                 let args: serde_json::Value = serde_json::from_str(&function.function.arguments)?;
-                (tool.emit)(ctx, args).await?;
+                pending.push((tool.emit, args));
+            }
+            for (emit, args) in pending {
+                emit(ctx, args).await?;
             }
         }
 

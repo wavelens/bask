@@ -41,7 +41,10 @@ mod tests {
 
     #[test]
     fn renders_key_value_and_honors_rename_in_declaration_order() {
-        let out = render_task(&Doc { path: "test.md".into(), size: 20480 });
+        let out = render_task(&Doc {
+            path: "test.md".into(),
+            size: 20480,
+        });
         assert_eq!(out, "path: test.md\nSizeBytes: 20480");
     }
 
@@ -52,7 +55,9 @@ mod tests {
 
     #[test]
     fn renders_nested_value_as_compact_json() {
-        let out = render_task(&Nested { tags: vec!["a".into(), "b".into()] });
+        let out = render_task(&Nested {
+            tags: vec!["a".into(), "b".into()],
+        });
         assert_eq!(out, r#"tags: ["a","b"]"#);
     }
 

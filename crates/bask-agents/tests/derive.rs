@@ -8,12 +8,14 @@ use bask_agents::AgentTask;
 
 #[derive(serde::Deserialize, schemars::JsonSchema, AgentTask)]
 struct Reply {
+    #[allow(dead_code)]
     text: String,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema, AgentTask)]
 #[agent(name = "custom_reply", description = "A short reply")]
 struct Custom {
+    #[allow(dead_code)]
     text: String,
 }
 
