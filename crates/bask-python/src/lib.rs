@@ -20,8 +20,8 @@ use arrow::pyarrow::{FromPyArrow, ToPyArrow};
 use arrow::record_batch::RecordBatch;
 use bask_core::{
     Backoff, Cancellation, CheckpointOps, Committed, Context, Coverage, Dataset, DeadLetter,
-    DeadLetterSink, DynWorker, Emitter, LiveConsole, RetryExt, RetryOn, RetryPolicy, RunReport,
-    Shutdown, SqliteStore, Status, Store, StoredItem, WorkerCfg,
+    DeadLetterSink, DynWorker, Emitter, Error, LiveConsole, RetryExt, RetryOn, RetryPolicy,
+    RunReport, Shutdown, SqliteStore, Status, Store, StoredItem, WorkerCfg,
 };
 use bask_io::FileDataset;
 
@@ -65,6 +65,20 @@ fn hint_from_pyerr(py: Python<'_>, err: &PyErr) -> Option<HintTag> {
         "different_attr" => HintTag::DifferentAttr(parts.get(1)?.clone()),
         _ => return None,
     })
+}
+
+/// Map an emit rejection to a Python exception. A policy violation carries `_bask_retry =
+/// ("fatal",)` so the scheduler treats it as terminal under any retry policy; anything else
+/// is a stopped engine.
+fn emit_err(py: Python<'_>, err: Error) -> PyErr {
+    match err {
+        Error::EmitNotAllowed { .. } => {
+            let py_err = PyRuntimeError::new_err(err.to_string());
+            let _ = py_err.value(py).setattr("_bask_retry", ("fatal",));
+            py_err
+        }
+        _ => PyRuntimeError::new_err("engine stopped"),
+    }
 }
 
 /// Build a Rust retry policy from the Python `Retry` scalars.
@@ -636,7 +650,7 @@ impl Ctx {
         // and the dispatcher needs the GIL to run the Python workers that drain it, so
         // holding it here would deadlock under backpressure.
         py.detach(|| self.emitter.emit_dyn(key, type_name, Box::new(task)))
-            .map_err(|_| PyRuntimeError::new_err("engine stopped"))?;
+            .map_err(|e| emit_err(py, e))?;
         Ok(())
     }
 
@@ -651,7 +665,7 @@ impl Ctx {
             self.emitter
                 .emit_keyed_dyn(key, route, type_name, Box::new(task))
         })
-        .map_err(|_| PyRuntimeError::new_err("engine stopped"))?;
+        .map_err(|e| emit_err(py, e))?;
         Ok(())
     }
 
@@ -669,14 +683,14 @@ impl Ctx {
         )?;
         router.call_method1("route", (value, &out))?;
         let buffered = std::mem::take(&mut out.borrow_mut().buffer);
-        py.detach(|| {
+        let res = py.detach(|| {
             for (key, type_name, payload, coverage) in buffered {
                 self.emitter
-                    .emit_covered_dyn(key, type_name, Box::new(payload), coverage)
-                    .map_err(|_| PyRuntimeError::new_err("engine stopped"))?;
+                    .emit_covered_dyn(key, type_name, Box::new(payload), coverage)?;
             }
-            Ok(())
-        })
+            Ok::<(), Error>(())
+        });
+        res.map_err(|e| emit_err(py, e))
     }
 
     /// Test-and-set against the dedup set `marker`: `True` the first time `key` is
@@ -740,6 +754,13 @@ struct Seed {
     type_name: &'static str,
     payload: Py<PyAny>,
     source: Option<String>,
+}
+
+/// A Python-declared emit policy: the source class key plus the classes it may emit.
+struct EmitPolicyReg {
+    key: u64,
+    from: &'static str,
+    allowed: Vec<(u64, &'static str)>,
 }
 
 /// A registered Python checkpoint class and the store identity/policy it carries.
@@ -946,6 +967,7 @@ struct Engine {
     registrations: Vec<Registration>,
     chunkers: Vec<ChunkerReg>,
     checkpoints: Vec<CheckpointReg>,
+    emit_policies: Vec<EmitPolicyReg>,
     seeds: Vec<Seed>,
     collectors: Vec<CollectorReg>,
 }
@@ -988,6 +1010,7 @@ impl Engine {
             registrations: Vec::new(),
             chunkers: Vec::new(),
             checkpoints: Vec::new(),
+            emit_policies: Vec::new(),
             seeds: Vec::new(),
             collectors: Vec::new(),
         }
@@ -1020,6 +1043,26 @@ impl Engine {
             key_only,
             cls,
         });
+        Ok(())
+    }
+
+    /// Constrain `cls` to emit only the task classes in `allows`; an unregistered class
+    /// emits freely. Enforced at emit time and terminal on violation.
+    fn emit_policy(
+        &mut self,
+        py: Python<'_>,
+        cls: Py<PyAny>,
+        allows: Vec<Py<PyAny>>,
+    ) -> PyResult<()> {
+        let (key, name) = class_key_name(cls.bind(py))?;
+        let from = intern(key, &name);
+        let mut allowed = Vec::with_capacity(allows.len());
+        for a in allows {
+            let (k, n) = class_key_name(a.bind(py))?;
+            allowed.push((k, intern(k, &n)));
+        }
+        self.emit_policies
+            .push(EmitPolicyReg { key, from, allowed });
         Ok(())
     }
 
@@ -1335,6 +1378,9 @@ impl Engine {
             });
             builder = builder.checkpoint_dyn(reg.key, ops);
         }
+        for reg in &self.emit_policies {
+            builder = builder.emit_policy_dyn(reg.key, reg.from, reg.allowed.clone());
+        }
         if let Some(obj) = &self.dataset {
             match obj.bind(py).extract::<PyRef<PyFileDataset>>() {
                 Ok(file) => builder = builder.dataset(file.inner.clone()),
@@ -1403,4 +1449,38 @@ fn _bask(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(coverage_rows, m)?)?;
     m.add_function(wrap_pyfunction!(coverage_to_bytes, m)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn emit_err_tags_violation_fatal() {
+        Python::attach(|py| {
+            let err = emit_err(
+                py,
+                bask_core::Error::EmitNotAllowed {
+                    from: "Src",
+                    to: "Bad",
+                    allowed: vec!["Ok"],
+                },
+            );
+            let tag: Vec<String> = err
+                .value(py)
+                .getattr("_bask_retry")
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert_eq!(tag, vec!["fatal".to_string()]);
+        });
+    }
+
+    #[test]
+    fn emit_err_stopped_is_plain() {
+        Python::attach(|py| {
+            let err = emit_err(py, bask_core::Error::Stopped);
+            assert!(err.value(py).getattr("_bask_retry").is_err());
+        });
+    }
 }
