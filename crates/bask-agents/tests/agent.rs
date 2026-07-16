@@ -102,7 +102,9 @@ async fn agent_emits_tool_call_as_task() {
     let report = Engine::builder()
         .worker(agent)
         .worker(Collect(collected.clone()))
-        .seed(Document { path: "a.md".into() })
+        .seed(Document {
+            path: "a.md".into(),
+        })
         .run()
         .await
         .unwrap();
@@ -144,13 +146,18 @@ async fn agent_invokes_on_text_for_plain_response() {
 
     let report = Engine::builder()
         .worker(agent)
-        .seed(Document { path: "a.md".into() })
+        .seed(Document {
+            path: "a.md".into(),
+        })
         .run()
         .await
         .unwrap();
 
     assert_eq!(report.stats.failed, 0);
-    assert_eq!(seen.lock().unwrap().as_slice(), &["a plain answer".to_string()]);
+    assert_eq!(
+        seen.lock().unwrap().as_slice(),
+        &["a plain answer".to_string()]
+    );
 }
 
 #[tokio::test]
@@ -175,7 +182,9 @@ async fn auth_error_fails_terminally() {
     let report = Engine::builder()
         .retry(RetryPolicy::new().max_attempts(5))
         .worker(agent)
-        .seed(Document { path: "a.md".into() })
+        .seed(Document {
+            path: "a.md".into(),
+        })
         .run()
         .await
         .unwrap();
@@ -216,7 +225,9 @@ async fn server_error_is_retried() {
         .retry(RetryPolicy::new().max_attempts(3))
         .worker(agent)
         .worker(Collect(collected.clone()))
-        .seed(Document { path: "a.md".into() })
+        .seed(Document {
+            path: "a.md".into(),
+        })
         .run()
         .await
         .unwrap();

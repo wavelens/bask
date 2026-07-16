@@ -20,7 +20,11 @@ pub struct Agents {
 
 impl Agents {
     pub fn new() -> Self {
-        Agents { base_url: None, model: "gpt-4o".to_string(), api_key: None }
+        Agents {
+            base_url: None,
+            model: "gpt-4o".to_string(),
+            api_key: None,
+        }
     }
     pub fn base_url(mut self, url: impl Into<String>) -> Self {
         self.base_url = Some(url.into());

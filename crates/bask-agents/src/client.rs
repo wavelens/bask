@@ -25,6 +25,8 @@ pub(crate) fn build_client(base_url: Option<&str>, api_key: Option<&str>) -> Cli
 
 /// Issue one chat completion. Transport errors, 429, and 5xx are retryable; every other API
 /// error is terminal (marked fatal so it skips retry under any policy).
+/// async-openai's client also retries 429/5xx a few times internally, beneath this
+/// classification, so bask-core's RetryPolicy governs only what survives that layer.
 pub(crate) async fn complete(
     client: &Client<OpenAIConfig>,
     request: CreateChatCompletionRequest,
