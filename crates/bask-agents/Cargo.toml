@@ -9,6 +9,7 @@ description = "LLM agent workers for bask: models that emit tasks along the Emit
 
 [dependencies]
 bask-core.workspace = true
+bask-agents-macros.workspace = true
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }

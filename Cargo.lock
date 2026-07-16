@@ -390,6 +390,7 @@ version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
+ "bask-agents-macros",
  "bask-core",
  "futures",
  "inventory",
@@ -397,6 +398,16 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "bask-agents-macros"
+version = "0.2.1"
+dependencies = [
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

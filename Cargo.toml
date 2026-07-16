@@ -9,6 +9,7 @@ members = [
     "crates/bask",
     "crates/bask-python",
     "crates/bask-agents",
+    "crates/bask-agents-macros",
 ]
 
 [workspace.package]
@@ -25,3 +26,4 @@ bask-io = { path = "crates/bask-io", version = "0.2.1" }
 bask-formats = { path = "crates/bask-formats", version = "0.2.1" }
 bask-tasks = { path = "crates/bask-tasks", version = "0.2.1" }
 bask-agents = { path = "crates/bask-agents", version = "0.2.1" }
+bask-agents-macros = { path = "crates/bask-agents-macros", version = "0.2.1" }

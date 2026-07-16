@@ -8,5 +8,6 @@
 
 mod registry;
 
+pub use bask_agents_macros::AgentTask;
 pub use inventory;
 pub use registry::{AgentTask, AgentTaskInfo};
