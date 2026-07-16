@@ -133,6 +133,20 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 ```
+
+## Emit policies
+
+A task may declare which task types it is allowed to emit. Derive it and list the targets:
+
+```rust
+#[derive(EmitPolicy)]
+#[emits(Parse, Retry)]
+struct Fetch { url: String }
+```
+
+Or register a hand-written impl with `EngineBuilder::emit_policy::<Fetch>()`. A task with no
+policy emits freely; emitting an undeclared type fails that task terminally.
+
 ## Acknowledgements
 
 Developed by Wavelens GmbH. Support us by contributing.
