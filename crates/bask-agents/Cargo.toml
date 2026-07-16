@@ -18,3 +18,4 @@ futures = "0.3"
 thiserror = "2"
 anyhow = "1"
 async-trait = "0.1"
+async-openai = { version = "0.41", features = ["chat-completion"] }

@@ -6,6 +6,7 @@
 
 //! bask-agents: LLM agent workers that emit tasks along a source task's EmitPolicy DAG.
 
+mod client;
 mod registry;
 mod render;
 
