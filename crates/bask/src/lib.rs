@@ -25,6 +25,10 @@ pub use bask_formats as formats;
 #[cfg(feature = "formats")]
 pub use bask_tasks as tasks;
 
+/// LLM agent workers: models that emit tasks along a source task's EmitPolicy DAG.
+#[cfg(feature = "agents")]
+pub use bask_agents as agents;
+
 /// Sharded, self-compacting checkpoint datasets: the [`Dataset`](bask_core::Dataset) trait
 /// and the directory-backed [`FileDataset`](bask_io::FileDataset) built on it.
 #[cfg(feature = "dataset")]

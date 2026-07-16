@@ -147,6 +147,30 @@ struct Fetch { url: String }
 Or register a hand-written impl with `EngineBuilder::emit_policy::<Fetch>()`. A task with no
 policy emits freely; emitting an undeclared type fails that task terminally.
 
+## Agents
+
+The `agents` feature (off by default) exposes `bask::agents`: LLM workers that consult a model
+and emit the resulting tasks along a source task's EmitPolicy, with `#[derive(AgentTask)]`
+registering each target as a callable tool and its schema.
+
+```rust
+use bask::EmitPolicy;
+use bask::agents::{AgentTask, Agents};
+
+#[derive(serde::Serialize, EmitPolicy)]
+#[emits(Summary)]
+struct Document { path: String }
+
+#[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema, AgentTask)]
+struct Summary { text: String }
+
+let agent = Agents::new()
+    .api_key("...")
+    .worker::<Document>()
+    .instruction("Summarize the document below.")
+    .build()?;
+```
+
 ## Acknowledgements
 
 Developed by Wavelens GmbH. Support us by contributing.

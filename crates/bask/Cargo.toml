@@ -15,6 +15,7 @@ bask-core.workspace = true
 bask-io = { workspace = true, optional = true }
 bask-formats = { workspace = true, optional = true }
 bask-tasks = { workspace = true, optional = true }
+bask-agents = { workspace = true, optional = true }
 anyhow = { version = "1", optional = true }
 
 [features]
@@ -26,6 +27,7 @@ cli = ["dataset", "bask-core/cli", "dep:anyhow"]
 download = ["io", "bask-io/download"]
 object-store = ["io", "bask-io/object-store"]
 postgres = ["formats", "bask-formats/postgres"]
+agents = ["dep:bask-agents"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
@@ -36,6 +38,7 @@ object_store = { version = "0.14", features = ["aws"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.40", features = ["bundled"] }
+schemars = "1"
 
 [[example]]
 name = "dataset"
@@ -56,6 +59,10 @@ required-features = ["formats"]
 [[example]]
 name = "rebatch"
 required-features = ["formats"]
+
+[[example]]
+name = "agent"
+required-features = ["agents"]
 
 [package.metadata.docs.rs]
 all-features = true
