@@ -1,0 +1,19 @@
+[package]
+name = "bask-agents"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "LLM agent workers for bask: models that emit tasks along the EmitPolicy DAG"
+
+[dependencies]
+bask-core.workspace = true
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+inventory = "0.3"
+futures = "0.3"
+thiserror = "2"
+anyhow = "1"
+async-trait = "0.1"
