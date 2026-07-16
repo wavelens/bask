@@ -33,6 +33,11 @@ impl Allow {
             .push((TypeId::of::<T>(), std::any::type_name::<T>()));
         self
     }
+
+    /// The task types this policy permits, for tools that reflect a declaration.
+    pub fn targets(&self) -> &[(TypeId, &'static str)] {
+        &self.targets
+    }
 }
 
 /// The allowed out-edges of one constrained source.
@@ -149,6 +154,14 @@ mod tests {
                 .check(RouteKey::Dyn(1), RouteKey::Dyn(3), "No")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn declared_targets_are_readable() {
+        let mut allow = Allow::default();
+        Src::declare(&mut allow);
+        assert_eq!(allow.targets().len(), 1);
+        assert!(allow.targets().iter().any(|(_, name)| name.ends_with("Ok1")));
     }
 }
 
