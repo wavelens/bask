@@ -17,6 +17,7 @@ pub mod cli;
 mod context;
 mod deadletter;
 mod dedup;
+mod emit_policy;
 mod engine;
 mod error;
 mod interrupt;
@@ -39,6 +40,7 @@ pub use checkpoint::{
 pub use context::Context;
 pub use deadletter::{DeadLetter, DeadLetterSink};
 pub use dedup::Dedup;
+pub use emit_policy::{Allow, EmitPolicy};
 pub use engine::{Engine, EngineBuilder, TaskInfo};
 pub use error::{Error, Result};
 pub use interrupt::{Cancellation, Shutdown};
@@ -63,9 +65,9 @@ pub use sqlite::SqliteStore;
 
 pub mod prelude {
     pub use crate::{
-        Attrs, Backoff, Context, DeadLetter, DeadLetterSink, Dedup, Emit, Engine, LiveConsole,
-        Monitor, RetryExt, RetryOn, RetryPolicy, Router, RunReport, Select, Shutdown, Snapshot,
-        Task, Worker, WorkerCfg,
+        Attrs, Backoff, Context, DeadLetter, DeadLetterSink, Dedup, Emit, EmitPolicy, Engine,
+        LiveConsole, Monitor, RetryExt, RetryOn, RetryPolicy, Router, RunReport, Select, Shutdown,
+        Snapshot, Task, Worker, WorkerCfg,
     };
     pub use anyhow;
     pub use async_trait::async_trait;
