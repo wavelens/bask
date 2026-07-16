@@ -516,6 +516,10 @@ impl EngineBuilder {
         for (key, ops) in self.checkpoints {
             checkpoints.insert(key, ops);
         }
+        #[cfg_attr(not(feature = "macros"), allow(unused_mut))]
+        let mut policies = self.policies;
+        #[cfg(feature = "macros")]
+        policies.insert_registered();
         Engine {
             registry,
             routers,
@@ -533,7 +537,7 @@ impl EngineBuilder {
             store: self.store,
             dataset: self.dataset,
             selection: self.selection,
-            policies: self.policies,
+            policies,
         }
     }
 

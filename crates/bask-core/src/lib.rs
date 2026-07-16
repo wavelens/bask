@@ -56,9 +56,13 @@ pub use worker::{DynWorker, Worker, WorkerCfg};
 
 #[cfg(feature = "checkpoint")]
 pub use bask_macros::Checkpoint;
+#[cfg(feature = "macros")]
+pub use bask_macros::EmitPolicy;
 #[cfg(feature = "checkpoint")]
 pub use checkpoint::{Checkpoint, CheckpointInfo};
-#[cfg(feature = "checkpoint")]
+#[cfg(feature = "macros")]
+pub use emit_policy::EmitPolicyInfo;
+#[cfg(feature = "macros")]
 pub use inventory;
 #[cfg(feature = "checkpoint")]
 pub use sqlite::SqliteStore;

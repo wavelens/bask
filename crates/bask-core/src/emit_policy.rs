@@ -151,3 +151,53 @@ mod tests {
         );
     }
 }
+
+#[cfg(feature = "macros")]
+mod derive_support {
+    use std::any::TypeId;
+
+    use super::{Allow, EmitPolicies, EmitPolicy, Node};
+    use crate::task::RouteKey;
+
+    /// The derive's registration record, gathered by `inventory` so the engine discovers a
+    /// policy with no builder call.
+    pub struct EmitPolicyInfo {
+        type_id: fn() -> TypeId,
+        type_name: fn() -> &'static str,
+        declare: fn(&mut Allow),
+    }
+
+    impl EmitPolicyInfo {
+        pub const fn of<T: EmitPolicy>() -> Self {
+            EmitPolicyInfo {
+                type_id: TypeId::of::<T>,
+                type_name: std::any::type_name::<T>,
+                declare: <T as EmitPolicy>::declare,
+            }
+        }
+    }
+
+    inventory::collect!(EmitPolicyInfo);
+
+    impl EmitPolicies {
+        /// Fold every `inventory`-submitted policy into the registry.
+        pub(crate) fn insert_registered(&mut self) {
+            for info in inventory::iter::<EmitPolicyInfo>() {
+                let mut allow = Allow::default();
+                (info.declare)(&mut allow);
+                let targets = allow
+                    .targets
+                    .into_iter()
+                    .map(|(id, n)| (RouteKey::Static(id), n))
+                    .collect();
+                self.map.insert(
+                    RouteKey::Static((info.type_id)()),
+                    Node::new((info.type_name)(), targets),
+                );
+            }
+        }
+    }
+}
+
+#[cfg(feature = "macros")]
+pub use derive_support::EmitPolicyInfo;
