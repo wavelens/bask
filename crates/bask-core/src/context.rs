@@ -8,10 +8,11 @@ use std::sync::Arc;
 
 use crate::checkpoint::{Coverage, Durability};
 use crate::dedup::{Dedup, Dedups};
+use crate::emit_policy::EmitPolicies;
 use crate::interrupt::{Cancel, Cancellation};
 use crate::router::{Emit, Router, Routers};
 use crate::scheduler::{InFlight, Queue, RunSlot, Sent};
-use crate::task::{Envelope, Task};
+use crate::task::{Envelope, RouteKey, Task};
 
 /// Handed to every worker. Its only powers: spawn more work, feed the routing plane.
 pub struct Context {
@@ -25,6 +26,8 @@ pub struct Context {
     pub(crate) keys: Coverage,
     pub(crate) source: Option<Arc<str>>,
     pub(crate) durability: Option<Arc<Durability>>,
+    pub(crate) current: RouteKey,
+    pub(crate) policies: Arc<EmitPolicies>,
 }
 
 impl Context {
@@ -52,6 +55,7 @@ impl Context {
     }
 
     async fn emit_envelope(&self, env: Envelope) -> crate::Result<()> {
+        self.policies.check(self.current, env.key, env.type_name)?;
         self.in_flight.inc();
         match self.queue.try_send(env) {
             Sent::Ok => Ok(()),

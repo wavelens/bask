@@ -14,6 +14,7 @@ use crate::checkpoint::{Admit, Coverage, Durability};
 use crate::context::Context;
 use crate::deadletter::{DeadLetter, DeadLetterSink};
 use crate::dedup::Dedups;
+use crate::emit_policy::EmitPolicies;
 use crate::interrupt::{Cancel, Shutdown};
 use crate::metrics::{Snapshot, WorkerStat};
 use crate::monitor::Monitor;
@@ -136,6 +137,8 @@ pub struct Emitter {
     keys: Coverage,
     source: Option<Arc<str>>,
     durability: Option<Arc<Durability>>,
+    current: RouteKey,
+    policies: Arc<EmitPolicies>,
 }
 
 impl Emitter {
@@ -192,6 +195,8 @@ impl Emitter {
         payload: Box<dyn std::any::Any + Send + Sync>,
         keys: Coverage,
     ) -> crate::Result<()> {
+        self.policies
+            .check(self.current, RouteKey::Dyn(key), type_name)?;
         self.in_flight.inc();
         let mut env = Envelope::new_dyn(key, type_name, payload);
         env.keys = keys;
@@ -226,6 +231,8 @@ impl crate::context::Context {
             keys: self.keys.clone(),
             source: self.source.clone(),
             durability: self.durability.clone(),
+            current: self.current,
+            policies: self.policies.clone(),
         }
     }
 }
@@ -295,6 +302,7 @@ pub(crate) async fn run(
     mut flush_hook: Option<FlushHook>,
     dead_letter: Option<Arc<dyn DeadLetterSink>>,
     durability: Option<Arc<Durability>>,
+    policies: Arc<EmitPolicies>,
 ) -> crate::Result<RunReport> {
     for group in registry.groups.values() {
         for inst in &group.instances {
@@ -398,6 +406,7 @@ pub(crate) async fn run(
                         cancel: cancel.clone(),
                         unfinished: unfinished.clone(),
                         durability: durability.clone(),
+                        policies: policies.clone(),
                     });
                 }
                 _ = in_flight.wait_idle() => {}
@@ -617,6 +626,7 @@ struct Dispatch {
     cancel: Cancel,
     unfinished: Arc<AtomicUsize>,
     durability: Option<Arc<Durability>>,
+    policies: Arc<EmitPolicies>,
 }
 
 fn dispatch(d: Dispatch) {
@@ -638,6 +648,7 @@ fn dispatch(d: Dispatch) {
             cancel,
             unfinished,
             durability,
+            policies,
         } = d;
 
         // Record a terminal failure and hand the type-erased payload to the dead-letter
@@ -769,6 +780,8 @@ fn dispatch(d: Dispatch) {
             keys: env.keys.clone(),
             source: env.source.clone(),
             durability: durability.clone(),
+            current: env.key,
+            policies: policies.clone(),
         };
         let outcome = match inst.timeout {
             Some(dur) => tokio::select! {
