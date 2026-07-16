@@ -167,6 +167,7 @@ class Engine:
         self._seeds: list[Any] = []
         self._sources: list[tuple[Any, str]] = []
         self._collectors: list[type] = []
+        self._emit_policies: list[tuple[type, list[type]]] = []
 
     def worker(
         self,
@@ -270,6 +271,12 @@ class Engine:
         self._sources.append((task, id))
         return self
 
+    def emit_policy(self, task_cls: type, allows: list[type]) -> "Engine":
+        """Constrain `task_cls` to emit only the task types in `allows`; a class with no
+        policy emits freely. Emitting an undeclared type fails that task terminally."""
+        self._emit_policies.append((task_cls, allows))
+        return self
+
     def collect(self, task_cls: type) -> "Engine":
         """Designate `task_cls` as a training output drained by `stream()`. The type is
         terminal: do not also register a worker for it. Combine with a `Checkpoint`
@@ -323,6 +330,8 @@ class Engine:
             engine.seed(task)
         for task, id in self._sources:
             engine.source(task, id)
+        for task_cls, allows in self._emit_policies:
+            engine.emit_policy(task_cls, allows)
         overlap = set(self._collectors) & {reg.task_cls for reg in self._registrations}
         if overlap:
             names = ", ".join(sorted(cls.__name__ for cls in overlap))
