@@ -131,7 +131,13 @@ impl RetryPolicy {
     /// policy default and treating `Fatal`/exhaustion as terminal.
     pub(crate) fn decide(&self, next_attempt: u32, err: &anyhow::Error) -> Decision {
         let hint = err.downcast_ref::<Hint>().map(|h| &h.on);
-        if matches!(hint, Some(RetryOn::Fatal)) || next_attempt >= self.max_attempts {
+        let policy_violation = err
+            .downcast_ref::<crate::Error>()
+            .is_some_and(|e| matches!(e, crate::Error::EmitNotAllowed { .. }));
+        if policy_violation
+            || matches!(hint, Some(RetryOn::Fatal))
+            || next_attempt >= self.max_attempts
+        {
             return Decision::Fail;
         }
         let select = match hint {

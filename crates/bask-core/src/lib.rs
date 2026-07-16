@@ -65,9 +65,9 @@ pub use sqlite::SqliteStore;
 
 pub mod prelude {
     pub use crate::{
-        Attrs, Backoff, Context, DeadLetter, DeadLetterSink, Dedup, Emit, EmitPolicy, Engine,
-        LiveConsole, Monitor, RetryExt, RetryOn, RetryPolicy, Router, RunReport, Select, Shutdown,
-        Snapshot, Task, Worker, WorkerCfg,
+        Allow, Attrs, Backoff, Context, DeadLetter, DeadLetterSink, Dedup, Emit, EmitPolicy,
+        Engine, LiveConsole, Monitor, RetryExt, RetryOn, RetryPolicy, Router, RunReport, Select,
+        Shutdown, Snapshot, Task, Worker, WorkerCfg,
     };
     pub use anyhow;
     pub use async_trait::async_trait;

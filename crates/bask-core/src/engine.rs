@@ -15,6 +15,7 @@ use tokio::sync::Semaphore;
 use crate::checkpoint::{CheckpointOps, Checkpoints, Dataset, Durability, Store};
 use crate::deadletter::DeadLetterSink;
 use crate::dedup::{Dedup, Dedups};
+use crate::emit_policy::{EmitPolicies, EmitPolicy};
 use crate::interrupt::Shutdown;
 use crate::monitor::Monitor;
 use crate::registry::{Group, Instance, Registry};
@@ -70,6 +71,7 @@ pub struct EngineBuilder {
     store: Option<Arc<dyn Store>>,
     dataset: Option<Arc<dyn Dataset>>,
     selection: Option<HashSet<String>>,
+    policies: EmitPolicies,
 }
 
 pub struct Engine {
@@ -89,6 +91,7 @@ pub struct Engine {
     store: Option<Arc<dyn Store>>,
     dataset: Option<Arc<dyn Dataset>>,
     selection: Option<HashSet<String>>,
+    policies: EmitPolicies,
 }
 
 impl Engine {
@@ -114,6 +117,7 @@ impl Engine {
             store: None,
             dataset: None,
             selection: None,
+            policies: EmitPolicies::default(),
         }
     }
 
@@ -171,6 +175,7 @@ impl Engine {
             self.flush_hook,
             self.dead_letter,
             durability,
+            Arc::new(self.policies),
         )
         .await
     }
@@ -301,6 +306,25 @@ impl EngineBuilder {
         self.dedups.push(Box::new(|dedups: &mut Dedups, shards| {
             dedups.insert::<D>(shards)
         }));
+        self
+    }
+
+    /// Constrain a task type to emit only the task types its [`EmitPolicy`] declares.
+    /// A task without a registered policy emits freely.
+    pub fn emit_policy<T: EmitPolicy>(mut self) -> Self {
+        self.policies.insert_static::<T>();
+        self
+    }
+
+    /// Register a dynamically-typed emit policy under a runtime routing `key`; used by
+    /// front-ends (the Python bindings) whose task types live outside Rust's type system.
+    pub fn emit_policy_dyn(
+        mut self,
+        key: u64,
+        from: &'static str,
+        allowed: Vec<(u64, &'static str)>,
+    ) -> Self {
+        self.policies.insert_dyn(key, from, allowed);
         self
     }
 
@@ -509,6 +533,7 @@ impl EngineBuilder {
             store: self.store,
             dataset: self.dataset,
             selection: self.selection,
+            policies: self.policies,
         }
     }
 
