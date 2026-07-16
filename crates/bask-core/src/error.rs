@@ -14,4 +14,10 @@ pub enum Error {
     Worker(#[source] anyhow::Error),
     #[error("checkpoint store failed: {0}")]
     Store(#[source] anyhow::Error),
+    #[error("task {from} may not emit {to}; allowed: {allowed:?}")]
+    EmitNotAllowed {
+        from: &'static str,
+        to: &'static str,
+        allowed: Vec<&'static str>,
+    },
 }
