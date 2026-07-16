@@ -6,11 +6,18 @@
 
 //! bask-agents: LLM agent workers that emit tasks along a source task's EmitPolicy DAG.
 
+mod agent;
 mod client;
+mod config;
+mod error;
 mod registry;
 mod render;
 
-pub use bask_agents_macros::AgentTask;
 pub use inventory;
+
+pub use agent::{Agent, AgentBuilder, ToolChoice};
+pub use bask_agents_macros::AgentTask;
+pub use config::Agents;
+pub use error::{Error, Result};
 pub use registry::{AgentTask, AgentTaskInfo};
 pub use render::render_task;

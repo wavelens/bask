@@ -19,3 +19,7 @@ thiserror = "2"
 anyhow = "1"
 async-trait = "0.1"
 async-openai = { version = "0.41", features = ["chat-completion"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+wiremock = "0.6"
