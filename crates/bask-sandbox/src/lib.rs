@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: MIT OR Apache-2.0
  */
 
-//! bask-sandbox: a pluggable `Sandbox` trait with Local and Container backends.
+//! bask-sandbox: a pluggable `Sandbox` trait with Local, OsSandbox, and Container backends.
 
 mod error;
 mod spec;

@@ -16,6 +16,12 @@ use crate::{Error, Result};
 /// A closure applied in the forked child (via `pre_exec`) to confine it before `exec`.
 pub(crate) type PreExecHook = Box<dyn FnMut() -> std::io::Result<()> + Send + Sync + 'static>;
 
+/// Map a caller path into the sandbox root, stripping a single leading `/` so absolute paths land
+/// under the root rather than escaping it.
+pub(crate) fn resolve(root: &std::path::Path, path: &std::path::Path) -> std::path::PathBuf {
+    root.join(path.strip_prefix("/").unwrap_or(path))
+}
+
 /// Shared subprocess runner used by the Local and OsSandbox backends.
 pub(crate) struct Subprocess {
     pub root: PathBuf,
@@ -78,7 +84,8 @@ impl Subprocess {
 
         if let Some(factory) = hook_factory {
             let hook = factory()?;
-            // Safety: the hook performs only async-signal-safe syscalls (landlock/seccomp/prctl).
+            // Safety: the hook runs in the forked child and performs only async-signal-safe,
+            // non-allocating syscalls (landlock restrict_self, seccomp apply_filter).
             unsafe {
                 std::os::unix::process::CommandExt::pre_exec(&mut std_cmd, hook);
             }

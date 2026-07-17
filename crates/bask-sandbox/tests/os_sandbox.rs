@@ -90,28 +90,42 @@ async fn network_is_denied_by_default() {
         return;
     }
     let sb = spawn(&os_spec()).await.unwrap();
-    // A TCP connect must fail with the default Network::None. Use a tool likely present; if
-    // absent the command's own nonzero exit still satisfies the assertion, so gate on a real
-    // network attempt via /dev/tcp (bash) or `getent`. Here we use a portable python3 attempt
-    // and accept skip if python3 is unavailable.
-    let script = "python3 - <<'PY'\nimport socket,sys\ntry:\n socket.create_connection(('1.1.1.1',80),timeout=2); print('OPEN')\nexcept Exception as e:\n print('BLOCKED'); sys.exit(0)\nsys.exit(1)\nPY";
+    // A TCP connect must fail under the default Network::None (seccomp denies inet sockets).
+    // Assert the guarantee whenever python3 OR bash can attempt a real connection; skip only if
+    // neither exists. A reachable network reads as OPEN and must fail the assertion.
+    let py = "python3 - <<'PY'\nimport socket,sys\ntry:\n socket.create_connection(('1.1.1.1',80),timeout=2); print('OPEN')\nexcept Exception:\n print('BLOCKED')\nPY";
     let out = sb
-        .exec(ExecRequest::new(vec![
-            "sh".into(),
-            "-c".into(),
-            script.into(),
-        ]))
+        .exec(ExecRequest::new(vec!["sh".into(), "-c".into(), py.into()]))
         .await
         .unwrap();
-    if out.stdout.is_empty() {
-        eprintln!("skipping: python3 unavailable in sandbox");
+    if !out.stdout.is_empty() {
+        assert_eq!(
+            out.stdout, b"BLOCKED\n",
+            "network must be blocked by default"
+        );
         sb.teardown().await.unwrap();
         return;
     }
-    assert_eq!(
-        out.stdout, b"BLOCKED\n",
-        "network must be blocked by default"
-    );
+
+    let bash = "exec 3<>/dev/tcp/1.1.1.1/80 && echo OPEN || echo BLOCKED";
+    let out = sb
+        .exec(ExecRequest::new(vec![
+            "bash".into(),
+            "-c".into(),
+            bash.into(),
+        ]))
+        .await
+        .unwrap();
+    if !out.stdout.is_empty() {
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("BLOCKED"),
+            "network must be blocked by default (bash /dev/tcp)"
+        );
+        sb.teardown().await.unwrap();
+        return;
+    }
+
+    eprintln!("skipping: neither python3 nor bash available in sandbox");
     sb.teardown().await.unwrap();
 }
 
