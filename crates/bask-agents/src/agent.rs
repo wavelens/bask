@@ -305,6 +305,21 @@ impl<Src: EmitPolicy + Serialize> Worker for Agent<Src> {
             // No terminal task emission this turn.
             let handled = self.step_builtins(&calls, &mut messages).await?;
             if !handled {
+                let unknown: Vec<&str> = calls
+                    .iter()
+                    .filter_map(|call| match call {
+                        ChatCompletionMessageToolCalls::Function(function) => {
+                            Some(function.function.name.as_str())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                if !unknown.is_empty() {
+                    return Err(anyhow::anyhow!(
+                        "model called unknown tool(s): {}",
+                        unknown.join(", ")
+                    ));
+                }
                 if let (Some(text), Some(on_text)) = (&text, &self.on_text) {
                     on_text(text)?;
                 }
