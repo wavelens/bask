@@ -11,6 +11,7 @@ mod spec;
 
 #[cfg(feature = "container")]
 mod container;
+mod exec_common;
 mod local;
 
 use std::path::Path;
