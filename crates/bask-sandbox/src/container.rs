@@ -4,8 +4,9 @@
  * SPDX-License-Identifier: MIT OR Apache-2.0
  */
 
+use std::collections::HashMap;
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use bollard::Docker;
@@ -27,6 +28,7 @@ pub(crate) struct ContainerSandbox {
     id: String,
     workdir: String,
     max_output_bytes: Option<usize>,
+    default_timeout: Option<Duration>,
 }
 
 impl From<bollard::errors::Error> for Error {
@@ -59,6 +61,8 @@ impl ContainerSandbox {
 
         let workdir = spec.workdir.to_string_lossy().to_string();
         let env: Vec<String> = spec.env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        // Hardening (cap_drop/readonly_rootfs/tmpfs/no-new-privileges) is applied here; rootless
+        // execution is expected from a rootless daemon (e.g. rootless podman). RUNTIME-UNVERIFIED.
         let host_config = HostConfig {
             network_mode: Some(match spec.network {
                 Network::None => "none".into(),
@@ -67,6 +71,10 @@ impl ContainerSandbox {
             }),
             memory: spec.limits.memory_bytes.map(|b| b as i64),
             nano_cpus: spec.limits.cpus.map(|c| (c as f64 * 1e9) as i64),
+            cap_drop: Some(vec!["ALL".to_string()]),
+            readonly_rootfs: Some(true),
+            security_opt: Some(vec!["no-new-privileges".to_string()]),
+            tmpfs: Some(HashMap::from([(workdir.clone(), String::new())])),
             ..Default::default()
         };
         let config = Config {
@@ -87,6 +95,7 @@ impl ContainerSandbox {
             id: created.id,
             workdir,
             max_output_bytes: spec.limits.max_output_bytes,
+            default_timeout: spec.limits.timeout,
         };
         sandbox.ensure_workdir().await?;
         for seed in &spec.seed_files {
@@ -117,6 +126,7 @@ impl ContainerSandbox {
 #[async_trait]
 impl Sandbox for ContainerSandbox {
     async fn exec(&self, req: ExecRequest) -> Result<ExecResult> {
+        let timeout = req.timeout.or(self.default_timeout);
         let exec = self
             .docker
             .create_exec(
@@ -132,21 +142,42 @@ impl Sandbox for ContainerSandbox {
             .await?;
 
         let started = Instant::now();
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        if let StartExecResults::Attached { mut output, .. } =
-            self.docker.start_exec(&exec.id, None).await?
-        {
-            while let Some(chunk) = output.next().await {
-                match chunk? {
-                    LogOutput::StdOut { message } => stdout.extend_from_slice(&message),
-                    LogOutput::StdErr { message } => stderr.extend_from_slice(&message),
-                    other => stdout.extend_from_slice(&other.into_bytes()),
+        let drain = async {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            if let StartExecResults::Attached { mut output, .. } =
+                self.docker.start_exec(&exec.id, None).await?
+            {
+                while let Some(chunk) = output.next().await {
+                    match chunk? {
+                        LogOutput::StdOut { message } => stdout.extend_from_slice(&message),
+                        LogOutput::StdErr { message } => stderr.extend_from_slice(&message),
+                        other => stdout.extend_from_slice(&other.into_bytes()),
+                    }
                 }
             }
-        }
-        let inspect = self.docker.inspect_exec(&exec.id).await?;
-        let exit_code = inspect.exit_code.unwrap_or(-1) as i32;
+            let inspect = self.docker.inspect_exec(&exec.id).await?;
+            let exit_code = inspect.exit_code.unwrap_or(-1) as i32;
+            Ok::<_, Error>((stdout, stderr, exit_code))
+        };
+
+        // On timeout the exec'd process keeps running inside the container until teardown force-removes
+        // the whole ephemeral container (the container analog of Local's kill_on_drop).
+        let (stdout, stderr, exit_code) = match timeout {
+            Some(limit) => match tokio::time::timeout(limit, drain).await {
+                Ok(res) => res?,
+                Err(_) => {
+                    return Ok(ExecResult {
+                        exit_code: 124,
+                        stdout: Vec::new(),
+                        stderr: b"timed out".to_vec(),
+                        truncated: false,
+                        duration: started.elapsed(),
+                    });
+                }
+            },
+            None => drain.await?,
+        };
 
         let (stdout, cut_out) = truncate(stdout, self.max_output_bytes);
         let (stderr, cut_err) = truncate(stderr, self.max_output_bytes);
@@ -236,19 +267,21 @@ impl Sandbox for ContainerSandbox {
 
 impl Drop for ContainerSandbox {
     fn drop(&mut self) {
-        let docker = self.docker.clone();
-        let id = self.id.clone();
-        tokio::task::spawn(async move {
-            let _ = docker
-                .remove_container(
-                    &id,
-                    Some(RemoveContainerOptions {
-                        force: true,
-                        v: true,
-                        ..Default::default()
-                    }),
-                )
-                .await;
-        });
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let docker = self.docker.clone();
+            let id = self.id.clone();
+            handle.spawn(async move {
+                let _ = docker
+                    .remove_container(
+                        &id,
+                        Some(RemoveContainerOptions {
+                            force: true,
+                            v: true,
+                            ..Default::default()
+                        }),
+                    )
+                    .await;
+            });
+        }
     }
 }
