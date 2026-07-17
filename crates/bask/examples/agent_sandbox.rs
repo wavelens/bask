@@ -4,8 +4,10 @@
  * SPDX-License-Identifier: MIT OR Apache-2.0
  */
 
-//! An agent that runs a shell command in a Local sandbox, reacts to its output, then emits a
-//! Report. Set OPENAI_API_KEY (and optionally OPENAI_BASE_URL) and run:
+//! An agent that runs a shell command in a sandbox, reacts to its output, then emits a Report.
+//! `SandboxSpec::default()` now uses `OsSandbox` (Landlock + seccomp on Linux); `Local` is an
+//! explicit opt-out for trusted use and `Container` is a stronger opt-in.
+//! Set OPENAI_API_KEY (and optionally OPENAI_BASE_URL) and run:
 //! `cargo run -p bask --features sandbox --example agent_sandbox`.
 
 use bask::agents::{Agents, SandboxSpec, ToolChoice};
