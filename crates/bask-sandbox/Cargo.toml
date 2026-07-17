@@ -10,7 +10,7 @@ description = "Sandboxed command execution for bask: a pluggable Sandbox trait w
 [dependencies]
 async-trait = "0.1"
 thiserror = "2"
-tokio = { version = "1", features = ["process", "fs", "io-util", "time", "rt"] }
+tokio = { version = "1", features = ["process", "fs", "io-util", "time", "rt", "macros"] }
 tempfile = "3"
 bollard = { version = "0.18", optional = true }
 tar = { version = "0.4", optional = true }

@@ -393,9 +393,20 @@ impl<Src: EmitPolicy + Serialize> Agent<Src> {
             return Ok(false);
         };
 
+        let builtin_calls: Vec<ChatCompletionMessageToolCalls> = calls
+            .iter()
+            .filter(|call| {
+                matches!(
+                    call,
+                    ChatCompletionMessageToolCalls::Function(f)
+                        if crate::tools::is_builtin(&f.function.name)
+                )
+            })
+            .cloned()
+            .collect();
         messages.push(
             ChatCompletionRequestAssistantMessageArgs::default()
-                .tool_calls(calls.to_vec())
+                .tool_calls(builtin_calls)
                 .build()?
                 .into(),
         );

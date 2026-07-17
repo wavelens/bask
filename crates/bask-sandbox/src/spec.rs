@@ -9,16 +9,11 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 /// Isolation strength the caller declares; `spawn` selects a backend that satisfies it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Isolation {
+    #[default]
     Local,
     Container,
-}
-
-impl Default for Isolation {
-    fn default() -> Self {
-        Isolation::Local
-    }
 }
 
 /// Network exposure inside the sandbox. Defaults to none.
@@ -67,7 +62,11 @@ impl Default for SandboxSpec {
             workdir: PathBuf::from("/work"),
             env: BTreeMap::new(),
             network: Network::None,
-            limits: Limits::default(),
+            limits: Limits {
+                timeout: Some(Duration::from_secs(300)),
+                max_output_bytes: Some(1 << 20),
+                ..Limits::default()
+            },
             seed_files: Vec::new(),
         }
     }
@@ -101,35 +100,17 @@ pub struct ExecResult {
     pub duration: Duration,
 }
 
-pub(crate) fn truncate(mut bytes: Vec<u8>, max: Option<usize>) -> (Vec<u8>, bool) {
-    match max {
-        Some(limit) if bytes.len() > limit => {
-            bytes.truncate(limit);
-            (bytes, true)
-        }
-        _ => (bytes, false),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn spec_defaults_are_local_and_no_network() {
+    fn spec_defaults_are_secure() {
         let spec = SandboxSpec::default();
         assert_eq!(spec.isolation, Isolation::Local);
         assert_eq!(spec.network, Network::None);
         assert!(spec.image.is_none());
-    }
-
-    #[test]
-    fn truncate_caps_and_flags() {
-        let (out, cut) = truncate(vec![1, 2, 3, 4], Some(2));
-        assert_eq!(out, vec![1, 2]);
-        assert!(cut);
-        let (out, cut) = truncate(vec![1, 2], Some(8));
-        assert_eq!(out, vec![1, 2]);
-        assert!(!cut);
+        assert!(spec.limits.timeout.is_some());
+        assert!(spec.limits.max_output_bytes.is_some());
     }
 }
