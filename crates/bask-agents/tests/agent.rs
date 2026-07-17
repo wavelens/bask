@@ -239,7 +239,7 @@ async fn server_error_is_retried() {
 
 #[tokio::test]
 async fn single_shot_emits_task_tool() {
-    use bask_agents::{AgentTask, Agents, ToolChoice};
+    use bask_agents::{Agents, ToolChoice};
     use bask_core::prelude::async_trait;
     use bask_core::{Context, EmitPolicy, Engine, Worker};
     use wiremock::matchers::method;
@@ -301,4 +301,50 @@ async fn single_shot_emits_task_tool() {
         .await
         .unwrap();
     assert_eq!(report.stats.failed, 0);
+}
+
+#[tokio::test]
+async fn unknown_tool_call_fails() {
+    let server = MockServer::start().await;
+    let body = json!({
+        "id": "1", "object": "chat.completion", "created": 0, "model": "gpt-4o",
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        "choices": [{
+            "index": 0, "finish_reason": "tool_calls",
+            "message": {
+                "role": "assistant", "content": null,
+                "tool_calls": [{
+                    "id": "c1", "type": "function",
+                    "function": {"name": "Nonexistent", "arguments": "{}"}
+                }]
+            }
+        }]
+    });
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .mount(&server)
+        .await;
+
+    let collected = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agents::new()
+        .base_url(server.uri())
+        .api_key("test")
+        .worker::<Document>()
+        .instruction("Summarize.")
+        .build()
+        .unwrap();
+
+    let report = Engine::builder()
+        .worker(agent)
+        .worker(Collect(collected.clone()))
+        .seed(Document {
+            path: "a.md".into(),
+        })
+        .run()
+        .await
+        .unwrap();
+
+    assert!(report.stats.failed >= 1);
+    assert!(collected.lock().unwrap().is_empty());
 }
