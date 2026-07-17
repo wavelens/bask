@@ -19,6 +19,13 @@ use async_openai::types::chat::{
 use async_trait::async_trait;
 use serde::Serialize;
 
+#[cfg(feature = "sandbox")]
+use async_openai::types::chat::{
+    ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestToolMessageArgs,
+};
+#[cfg(feature = "sandbox")]
+use bask_sandbox::SandboxSpec;
+
 use bask_core::{Allow, Context, EmitPolicy, Worker};
 
 use crate::client;
@@ -26,6 +33,11 @@ use crate::config::Agents;
 use crate::error::{Error, Result};
 use crate::registry::{EmitFn, registry};
 use crate::render::render_task;
+
+#[cfg(feature = "sandbox")]
+type SandboxRef<'a> = Option<&'a dyn bask_sandbox::Sandbox>;
+#[cfg(not(feature = "sandbox"))]
+type SandboxRef<'a> = core::marker::PhantomData<&'a ()>;
 
 /// Whether the model may, must, or must not call a tool.
 #[derive(Clone, Copy, Default)]
@@ -66,8 +78,12 @@ pub struct Agent<Src> {
     max_tokens: Option<u32>,
     tools: Vec<ResolvedTool>,
     openai_tools: Vec<ChatCompletionTools>,
+    #[allow(dead_code)]
+    builtin_tools: Vec<ChatCompletionTools>,
     on_text: Option<OnText>,
     max_steps: usize,
+    #[cfg(feature = "sandbox")]
+    sandbox: Option<SandboxSpec>,
     _src: PhantomData<fn() -> Src>,
 }
 
@@ -91,6 +107,8 @@ pub struct AgentBuilder<Src> {
     max_tokens: Option<u32>,
     on_text: Option<OnText>,
     max_steps: usize,
+    #[cfg(feature = "sandbox")]
+    sandbox: Option<SandboxSpec>,
     _src: PhantomData<fn() -> Src>,
 }
 
@@ -108,6 +126,8 @@ impl<Src: EmitPolicy + Serialize> AgentBuilder<Src> {
             max_tokens: None,
             on_text: None,
             max_steps: 1,
+            #[cfg(feature = "sandbox")]
+            sandbox: None,
             _src: PhantomData,
         }
     }
@@ -159,6 +179,14 @@ impl<Src: EmitPolicy + Serialize> AgentBuilder<Src> {
         self
     }
 
+    /// Attach an ephemeral per-task sandbox and offer the built-in `run_command`,
+    /// `write_file`, and `read_file` tools to the model.
+    #[cfg(feature = "sandbox")]
+    pub fn sandbox(mut self, spec: SandboxSpec) -> Self {
+        self.sandbox = Some(spec);
+        self
+    }
+
     /// Resolve tools from `Src`'s EmitPolicy and build the agent, failing if a declared target
     /// is not a registered `AgentTask`.
     pub fn build(self) -> Result<Agent<Src>> {
@@ -196,6 +224,25 @@ impl<Src: EmitPolicy + Serialize> AgentBuilder<Src> {
         let api_key = self.api_key.or_else(|| self.defaults.api_key.clone());
         let client = client::build_client(base_url.as_deref(), api_key.as_deref());
 
+        #[cfg(feature = "sandbox")]
+        let builtin_tools = if self.sandbox.is_some() {
+            for tool in &tools {
+                if crate::tools::is_builtin(tool.name) {
+                    return Err(Error::ReservedToolName { name: tool.name });
+                }
+            }
+            let built = crate::tools::builtin_tools().map_err(|err| Error::Tool {
+                name: "builtin",
+                message: err.to_string(),
+            })?;
+            openai_tools.extend(built.clone());
+            built
+        } else {
+            Vec::new()
+        };
+        #[cfg(not(feature = "sandbox"))]
+        let builtin_tools: Vec<ChatCompletionTools> = Vec::new();
+
         Ok(Agent {
             client,
             model,
@@ -206,8 +253,11 @@ impl<Src: EmitPolicy + Serialize> AgentBuilder<Src> {
             max_tokens: self.max_tokens,
             tools,
             openai_tools,
+            builtin_tools,
             on_text: self.on_text,
             max_steps: self.max_steps,
+            #[cfg(feature = "sandbox")]
+            sandbox: self.sandbox,
             _src: PhantomData,
         })
     }
@@ -253,20 +303,12 @@ impl<Src: EmitPolicy + Serialize> Agent<Src> {
         Ok(messages)
     }
 
-    async fn step_builtins(
+    async fn run_loop(
         &self,
-        _calls: &[ChatCompletionMessageToolCalls],
-        _messages: &mut Vec<ChatCompletionRequestMessage>,
-    ) -> anyhow::Result<bool> {
-        Ok(false)
-    }
-}
-
-#[async_trait]
-impl<Src: EmitPolicy + Serialize> Worker for Agent<Src> {
-    type Task = Src;
-
-    async fn process(&self, task: &Src, ctx: &Context) -> anyhow::Result<()> {
+        task: &Src,
+        ctx: &Context,
+        sandbox: SandboxRef<'_>,
+    ) -> anyhow::Result<()> {
         let mut messages = self.seed_messages(task)?;
         let mut last_text: Option<String> = None;
 
@@ -302,8 +344,7 @@ impl<Src: EmitPolicy + Serialize> Worker for Agent<Src> {
                 return Ok(());
             }
 
-            // No terminal task emission this turn.
-            let handled = self.step_builtins(&calls, &mut messages).await?;
+            let handled = self.step_builtins(&calls, &mut messages, sandbox).await?;
             if !handled {
                 let unknown: Vec<&str> = calls
                     .iter()
@@ -333,5 +374,85 @@ impl<Src: EmitPolicy + Serialize> Worker for Agent<Src> {
             self.max_steps,
             last_text.unwrap_or_default()
         ))
+    }
+
+    #[cfg(feature = "sandbox")]
+    async fn step_builtins(
+        &self,
+        calls: &[ChatCompletionMessageToolCalls],
+        messages: &mut Vec<ChatCompletionRequestMessage>,
+        sandbox: SandboxRef<'_>,
+    ) -> anyhow::Result<bool> {
+        let builtin: Vec<_> = calls
+            .iter()
+            .filter_map(|call| match call {
+                ChatCompletionMessageToolCalls::Function(f)
+                    if crate::tools::is_builtin(&f.function.name) =>
+                {
+                    Some(f)
+                }
+                _ => None,
+            })
+            .collect();
+        if builtin.is_empty() {
+            return Ok(false);
+        }
+        let Some(sandbox) = sandbox else {
+            return Ok(false);
+        };
+
+        messages.push(
+            ChatCompletionRequestAssistantMessageArgs::default()
+                .tool_calls(calls.to_vec())
+                .build()?
+                .into(),
+        );
+        for call in builtin {
+            let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
+            let result = crate::tools::execute(sandbox, &call.function.name, args).await?;
+            messages.push(
+                ChatCompletionRequestToolMessageArgs::default()
+                    .content(result)
+                    .tool_call_id(call.id.clone())
+                    .build()?
+                    .into(),
+            );
+        }
+        Ok(true)
+    }
+
+    #[cfg(not(feature = "sandbox"))]
+    async fn step_builtins(
+        &self,
+        _calls: &[ChatCompletionMessageToolCalls],
+        _messages: &mut Vec<ChatCompletionRequestMessage>,
+        _sandbox: SandboxRef<'_>,
+    ) -> anyhow::Result<bool> {
+        Ok(false)
+    }
+}
+
+#[async_trait]
+impl<Src: EmitPolicy + Serialize> Worker for Agent<Src> {
+    type Task = Src;
+
+    async fn process(&self, task: &Src, ctx: &Context) -> anyhow::Result<()> {
+        #[cfg(feature = "sandbox")]
+        let sandbox = match &self.sandbox {
+            Some(spec) => Some(bask_sandbox::spawn(spec).await?),
+            None => None,
+        };
+        #[cfg(feature = "sandbox")]
+        let handle: SandboxRef = sandbox.as_deref();
+        #[cfg(not(feature = "sandbox"))]
+        let handle: SandboxRef = core::marker::PhantomData;
+
+        let result = self.run_loop(task, ctx, handle).await;
+
+        #[cfg(feature = "sandbox")]
+        if let Some(sandbox) = sandbox {
+            let _ = sandbox.teardown().await;
+        }
+        result
     }
 }

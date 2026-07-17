@@ -14,6 +14,8 @@ pub enum Error {
     },
     #[error("failed to build tool {name}: {message}")]
     Tool { name: &'static str, message: String },
+    #[error("emit target {name} collides with a built-in sandbox tool name")]
+    ReservedToolName { name: &'static str },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
