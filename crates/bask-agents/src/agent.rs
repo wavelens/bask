@@ -67,6 +67,7 @@ pub struct Agent<Src> {
     tools: Vec<ResolvedTool>,
     openai_tools: Vec<ChatCompletionTools>,
     on_text: Option<OnText>,
+    max_steps: usize,
     _src: PhantomData<fn() -> Src>,
 }
 
@@ -89,6 +90,7 @@ pub struct AgentBuilder<Src> {
     temperature: Option<f32>,
     max_tokens: Option<u32>,
     on_text: Option<OnText>,
+    max_steps: usize,
     _src: PhantomData<fn() -> Src>,
 }
 
@@ -105,6 +107,7 @@ impl<Src: EmitPolicy + Serialize> AgentBuilder<Src> {
             temperature: None,
             max_tokens: None,
             on_text: None,
+            max_steps: 1,
             _src: PhantomData,
         }
     }
@@ -146,6 +149,13 @@ impl<Src: EmitPolicy + Serialize> AgentBuilder<Src> {
         F: Fn(&str) -> anyhow::Result<()> + Send + Sync + 'static,
     {
         self.on_text = Some(Arc::new(callback));
+        self
+    }
+
+    /// Cap the agent's model turns. 1 (default) is single-shot emit; n>1 lets the agent
+    /// react to sandbox tool output before terminating by emitting a task.
+    pub fn max_steps(mut self, n: usize) -> Self {
+        self.max_steps = n.max(1);
         self
     }
 
@@ -197,29 +207,17 @@ impl<Src: EmitPolicy + Serialize> AgentBuilder<Src> {
             tools,
             openai_tools,
             on_text: self.on_text,
+            max_steps: self.max_steps,
             _src: PhantomData,
         })
     }
 }
 
 impl<Src: EmitPolicy + Serialize> Agent<Src> {
-    fn build_request(&self, user: String) -> anyhow::Result<CreateChatCompletionRequest> {
-        let mut messages: Vec<ChatCompletionRequestMessage> = Vec::new();
-        if let Some(system) = &self.system {
-            messages.push(
-                ChatCompletionRequestSystemMessageArgs::default()
-                    .content(system.clone())
-                    .build()?
-                    .into(),
-            );
-        }
-        messages.push(
-            ChatCompletionRequestUserMessageArgs::default()
-                .content(user)
-                .build()?
-                .into(),
-        );
-
+    fn build_request(
+        &self,
+        messages: Vec<ChatCompletionRequestMessage>,
+    ) -> anyhow::Result<CreateChatCompletionRequest> {
         let mut request = CreateChatCompletionRequestArgs::default();
         request.model(self.model.clone()).messages(messages);
         if !self.openai_tools.is_empty() {
@@ -234,6 +232,34 @@ impl<Src: EmitPolicy + Serialize> Agent<Src> {
         }
         Ok(request.build()?)
     }
+
+    fn seed_messages(&self, task: &Src) -> anyhow::Result<Vec<ChatCompletionRequestMessage>> {
+        let mut messages: Vec<ChatCompletionRequestMessage> = Vec::new();
+        if let Some(system) = &self.system {
+            messages.push(
+                ChatCompletionRequestSystemMessageArgs::default()
+                    .content(system.clone())
+                    .build()?
+                    .into(),
+            );
+        }
+        let user = format!("{}\n\nTask:\n{}", self.instruction, render_task(task));
+        messages.push(
+            ChatCompletionRequestUserMessageArgs::default()
+                .content(user)
+                .build()?
+                .into(),
+        );
+        Ok(messages)
+    }
+
+    async fn step_builtins(
+        &self,
+        _calls: &[ChatCompletionMessageToolCalls],
+        _messages: &mut Vec<ChatCompletionRequestMessage>,
+    ) -> anyhow::Result<bool> {
+        Ok(false)
+    }
 }
 
 #[async_trait]
@@ -241,41 +267,56 @@ impl<Src: EmitPolicy + Serialize> Worker for Agent<Src> {
     type Task = Src;
 
     async fn process(&self, task: &Src, ctx: &Context) -> anyhow::Result<()> {
-        let user = format!("{}\n\nTask:\n{}", self.instruction, render_task(task));
-        let request = self.build_request(user)?;
-        let response = client::complete(&self.client, request).await?;
+        let mut messages = self.seed_messages(task)?;
+        let mut last_text: Option<String> = None;
 
-        let Some(choice) = response.choices.into_iter().next() else {
-            return Ok(());
-        };
+        for _ in 0..self.max_steps {
+            let request = self.build_request(messages.clone())?;
+            let response = client::complete(&self.client, request).await?;
+            let Some(choice) = response.choices.into_iter().next() else {
+                return Ok(());
+            };
 
-        if let Some(calls) = choice.message.tool_calls {
-            let mut pending: Vec<(EmitFn, serde_json::Value)> = Vec::new();
-            for call in calls {
+            let calls = choice.message.tool_calls.clone().unwrap_or_default();
+            let mut task_emits: Vec<(EmitFn, serde_json::Value)> = Vec::new();
+            for call in &calls {
                 let ChatCompletionMessageToolCalls::Function(function) = call else {
                     continue;
                 };
-                let tool = self
-                    .tools
-                    .iter()
-                    .find(|tool| tool.name == function.function.name)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("model called unknown tool {}", function.function.name)
-                    })?;
-                let args: serde_json::Value = serde_json::from_str(&function.function.arguments)?;
-                pending.push((tool.emit, args));
+                if let Some(tool) = self.tools.iter().find(|t| t.name == function.function.name) {
+                    let args: serde_json::Value =
+                        serde_json::from_str(&function.function.arguments)?;
+                    task_emits.push((tool.emit, args));
+                }
             }
-            for (emit, args) in pending {
-                emit(ctx, args).await?;
+
+            let text = choice.message.content.filter(|t| !t.trim().is_empty());
+
+            if !task_emits.is_empty() {
+                for (emit, args) in task_emits {
+                    emit(ctx, args).await?;
+                }
+                if let (Some(text), Some(on_text)) = (&text, &self.on_text) {
+                    on_text(text)?;
+                }
+                return Ok(());
             }
+
+            // No terminal task emission this turn.
+            let handled = self.step_builtins(&calls, &mut messages).await?;
+            if !handled {
+                if let (Some(text), Some(on_text)) = (&text, &self.on_text) {
+                    on_text(text)?;
+                }
+                return Ok(());
+            }
+            last_text = text;
         }
 
-        if let Some(text) = choice.message.content
-            && !text.trim().is_empty()
-            && let Some(on_text) = &self.on_text
-        {
-            on_text(&text)?;
-        }
-        Ok(())
+        Err(anyhow::anyhow!(
+            "agent reached max_steps ({}) without emitting a task; last text: {}",
+            self.max_steps,
+            last_text.unwrap_or_default()
+        ))
     }
 }
