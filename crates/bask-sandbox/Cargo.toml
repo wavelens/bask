@@ -1,0 +1,25 @@
+[package]
+name = "bask-sandbox"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Sandboxed command execution for bask: a pluggable Sandbox trait with Local and Container backends"
+
+[dependencies]
+async-trait = "0.1"
+thiserror = "2"
+tokio = { version = "1", features = ["process", "fs", "io-util", "time", "rt"] }
+tempfile = "3"
+bollard = { version = "0.18", optional = true }
+tar = { version = "0.4", optional = true }
+futures = { version = "0.3", optional = true }
+
+[features]
+default = ["local"]
+local = []
+container = ["dep:bollard", "dep:tar", "dep:futures"]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "fs", "io-util", "time"] }
