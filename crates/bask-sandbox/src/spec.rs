@@ -13,6 +13,7 @@ use std::time::Duration;
 pub enum Isolation {
     #[default]
     Local,
+    OsSandbox,
     Container,
 }
 

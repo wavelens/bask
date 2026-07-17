@@ -13,6 +13,8 @@ mod spec;
 mod container;
 mod exec_common;
 mod local;
+#[cfg(all(feature = "os-sandbox", target_os = "linux"))]
+mod os_sandbox;
 
 use std::path::Path;
 
@@ -34,6 +36,20 @@ pub trait Sandbox: Send + Sync {
 pub async fn spawn(spec: &SandboxSpec) -> Result<Box<dyn Sandbox>> {
     match spec.isolation {
         Isolation::Local => Ok(Box::new(local::LocalSandbox::spawn(spec).await?)),
+        Isolation::OsSandbox => {
+            #[cfg(all(feature = "os-sandbox", target_os = "linux"))]
+            {
+                Ok(Box::new(os_sandbox::OsSandbox::spawn(spec).await?))
+            }
+            #[cfg(not(all(feature = "os-sandbox", target_os = "linux")))]
+            {
+                Err(Error::Unavailable(
+                    "os-sandbox",
+                    "OsSandbox is only supported on Linux with the 'os-sandbox' feature"
+                        .to_string(),
+                ))
+            }
+        }
         Isolation::Container => {
             #[cfg(feature = "container")]
             {
