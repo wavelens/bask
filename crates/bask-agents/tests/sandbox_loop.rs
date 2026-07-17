@@ -9,7 +9,6 @@
 use bask_agents::{Agents, ToolChoice};
 use bask_core::prelude::async_trait;
 use bask_core::{Context, EmitPolicy, Engine, Worker};
-use bask_sandbox::SandboxSpec;
 use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -79,7 +78,10 @@ async fn agent_runs_command_then_emits() {
         .worker::<Job>()
         .instruction("run the goal then report")
         .tool_choice(ToolChoice::Auto)
-        .sandbox(SandboxSpec::default())
+        .sandbox(bask_sandbox::SandboxSpec {
+            isolation: bask_sandbox::Isolation::Local,
+            ..bask_sandbox::SandboxSpec::default()
+        })
         .max_steps(4)
         .build()
         .unwrap();
@@ -95,4 +97,12 @@ async fn agent_runs_command_then_emits() {
         .unwrap();
     assert_eq!(report.stats.failed, 0);
     assert!(report.stats.processed >= 2);
+}
+
+#[test]
+fn default_sandbox_isolation_is_os_sandbox() {
+    assert_eq!(
+        bask_sandbox::SandboxSpec::default().isolation,
+        bask_sandbox::Isolation::OsSandbox
+    );
 }

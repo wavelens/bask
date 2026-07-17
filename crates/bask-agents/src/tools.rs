@@ -124,11 +124,15 @@ pub(crate) async fn execute(
 #[cfg(all(test, feature = "sandbox"))]
 mod tests {
     use super::*;
-    use bask_sandbox::SandboxSpec;
+    use bask_sandbox::{Isolation, SandboxSpec};
 
     #[tokio::test]
     async fn run_command_ignores_invalid_timeout_secs() {
-        let sandbox = bask_sandbox::spawn(&SandboxSpec::default()).await.unwrap();
+        let spec = SandboxSpec {
+            isolation: Isolation::Local,
+            ..SandboxSpec::default()
+        };
+        let sandbox = bask_sandbox::spawn(&spec).await.unwrap();
 
         let result = execute(
             &*sandbox,
