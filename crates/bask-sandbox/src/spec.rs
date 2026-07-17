@@ -9,6 +9,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 /// Isolation strength the caller declares; `spawn` selects a backend that satisfies it.
+/// `Local` is a no-isolation opt-out; `OsSandbox` (default) is daemonless OS-level confinement
+/// (Landlock + seccomp on Linux); `Container` is a stronger opt-in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Isolation {
     Local,
