@@ -101,7 +101,6 @@ pub struct ExecResult {
     pub duration: Duration,
 }
 
-#[allow(dead_code)] // wired into the Local backend in Task 2
 pub(crate) fn truncate(mut bytes: Vec<u8>, max: Option<usize>) -> (Vec<u8>, bool) {
     match max {
         Some(limit) if bytes.len() > limit => {
