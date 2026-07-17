@@ -236,3 +236,69 @@ async fn server_error_is_retried() {
     assert_eq!(report.stats.retried, 1);
     assert_eq!(collected.lock().unwrap().as_slice(), &["ok".to_string()]);
 }
+
+#[tokio::test]
+async fn single_shot_emits_task_tool() {
+    use bask_agents::{AgentTask, Agents, ToolChoice};
+    use bask_core::prelude::async_trait;
+    use bask_core::{Context, EmitPolicy, Engine, Worker};
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[derive(serde::Serialize, EmitPolicy)]
+    #[emits(Echoed)]
+    struct In {
+        text: String,
+    }
+
+    #[derive(
+        serde::Serialize, serde::Deserialize, schemars::JsonSchema, bask_agents::AgentTask,
+    )]
+    struct Echoed {
+        text: String,
+    }
+
+    struct Sink;
+    #[async_trait]
+    impl Worker for Sink {
+        type Task = Echoed;
+        async fn process(&self, t: &Echoed, _c: &Context) -> anyhow::Result<()> {
+            assert_eq!(t.text, "hi");
+            Ok(())
+        }
+    }
+
+    let server = MockServer::start().await;
+    let body = serde_json::json!({
+        "id": "1", "object": "chat.completion", "created": 0, "model": "m",
+        "choices": [{ "index": 0, "finish_reason": "tool_calls", "message": {
+            "role": "assistant", "content": null,
+            "tool_calls": [{ "id": "c1", "type": "function",
+                "function": { "name": "Echoed", "arguments": "{\"text\":\"hi\"}" } }]
+        }}]
+    });
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .mount(&server)
+        .await;
+
+    let agent = Agents::new()
+        .base_url(format!("{}/v1", server.uri()))
+        .api_key("test")
+        .model("m")
+        .worker::<In>()
+        .instruction("echo")
+        .tool_choice(ToolChoice::Required)
+        .max_steps(1)
+        .build()
+        .unwrap();
+
+    let report = Engine::builder()
+        .worker(agent)
+        .worker(Sink)
+        .seed(In { text: "hi".into() })
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(report.stats.failed, 0);
+}
