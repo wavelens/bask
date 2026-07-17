@@ -78,8 +78,6 @@ pub struct Agent<Src> {
     max_tokens: Option<u32>,
     tools: Vec<ResolvedTool>,
     openai_tools: Vec<ChatCompletionTools>,
-    #[allow(dead_code)]
-    builtin_tools: Vec<ChatCompletionTools>,
     on_text: Option<OnText>,
     max_steps: usize,
     #[cfg(feature = "sandbox")]
@@ -225,7 +223,7 @@ impl<Src: EmitPolicy + Serialize> AgentBuilder<Src> {
         let client = client::build_client(base_url.as_deref(), api_key.as_deref());
 
         #[cfg(feature = "sandbox")]
-        let builtin_tools = if self.sandbox.is_some() {
+        if self.sandbox.is_some() {
             for tool in &tools {
                 if crate::tools::is_builtin(tool.name) {
                     return Err(Error::ReservedToolName { name: tool.name });
@@ -235,13 +233,8 @@ impl<Src: EmitPolicy + Serialize> AgentBuilder<Src> {
                 name: "builtin",
                 message: err.to_string(),
             })?;
-            openai_tools.extend(built.clone());
-            built
-        } else {
-            Vec::new()
-        };
-        #[cfg(not(feature = "sandbox"))]
-        let builtin_tools: Vec<ChatCompletionTools> = Vec::new();
+            openai_tools.extend(built);
+        }
 
         Ok(Agent {
             client,
@@ -253,7 +246,6 @@ impl<Src: EmitPolicy + Serialize> AgentBuilder<Src> {
             max_tokens: self.max_tokens,
             tools,
             openai_tools,
-            builtin_tools,
             on_text: self.on_text,
             max_steps: self.max_steps,
             #[cfg(feature = "sandbox")]
