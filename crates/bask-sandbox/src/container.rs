@@ -19,8 +19,23 @@ use bollard::image::CreateImageOptions;
 use bollard::models::HostConfig;
 use futures::{StreamExt, TryStreamExt};
 
-use crate::spec::{ExecRequest, ExecResult, Network, SandboxSpec, truncate};
+use crate::spec::{ExecRequest, ExecResult, Network, SandboxSpec};
 use crate::{Error, Result, Sandbox};
+
+/// Append `bytes` onto `buf` up to `max`, flagging `truncated` when any bytes are dropped.
+fn append_capped(buf: &mut Vec<u8>, bytes: &[u8], max: Option<usize>, truncated: &mut bool) {
+    match max {
+        Some(m) if buf.len() >= m => *truncated = true,
+        Some(m) => {
+            let take = (m - buf.len()).min(bytes.len());
+            buf.extend_from_slice(&bytes[..take]);
+            if take < bytes.len() {
+                *truncated = true;
+            }
+        }
+        None => buf.extend_from_slice(bytes),
+    }
+}
 
 /// A container-isolated backend backed by an OCI runtime (Docker or Podman) via bollard.
 pub(crate) struct ContainerSandbox {
@@ -142,28 +157,36 @@ impl Sandbox for ContainerSandbox {
             .await?;
 
         let started = Instant::now();
+        let max = self.max_output_bytes;
         let drain = async {
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
+            let mut truncated = false;
             if let StartExecResults::Attached { mut output, .. } =
                 self.docker.start_exec(&exec.id, None).await?
             {
                 while let Some(chunk) = output.next().await {
                     match chunk? {
-                        LogOutput::StdOut { message } => stdout.extend_from_slice(&message),
-                        LogOutput::StdErr { message } => stderr.extend_from_slice(&message),
-                        other => stdout.extend_from_slice(&other.into_bytes()),
+                        LogOutput::StdOut { message } => {
+                            append_capped(&mut stdout, &message, max, &mut truncated)
+                        }
+                        LogOutput::StdErr { message } => {
+                            append_capped(&mut stderr, &message, max, &mut truncated)
+                        }
+                        other => {
+                            append_capped(&mut stdout, &other.into_bytes(), max, &mut truncated)
+                        }
                     }
                 }
             }
             let inspect = self.docker.inspect_exec(&exec.id).await?;
             let exit_code = inspect.exit_code.unwrap_or(-1) as i32;
-            Ok::<_, Error>((stdout, stderr, exit_code))
+            Ok::<_, Error>((stdout, stderr, truncated, exit_code))
         };
 
         // On timeout the exec'd process keeps running inside the container until teardown force-removes
         // the whole ephemeral container (the container analog of Local's kill_on_drop).
-        let (stdout, stderr, exit_code) = match timeout {
+        let (stdout, stderr, truncated, exit_code) = match timeout {
             Some(limit) => match tokio::time::timeout(limit, drain).await {
                 Ok(res) => res?,
                 Err(_) => {
@@ -179,13 +202,11 @@ impl Sandbox for ContainerSandbox {
             None => drain.await?,
         };
 
-        let (stdout, cut_out) = truncate(stdout, self.max_output_bytes);
-        let (stderr, cut_err) = truncate(stderr, self.max_output_bytes);
         Ok(ExecResult {
             exit_code,
             stdout,
             stderr,
-            truncated: cut_out || cut_err,
+            truncated,
             duration: started.elapsed(),
         })
     }

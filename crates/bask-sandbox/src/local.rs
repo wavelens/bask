@@ -13,10 +13,11 @@ use tempfile::TempDir;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
-use crate::spec::{ExecRequest, ExecResult, SandboxSpec, truncate};
+use crate::spec::{ExecRequest, ExecResult, SandboxSpec};
 use crate::{Error, Result, Sandbox};
 
-/// A no-isolation backend: commands run as host subprocesses rooted in a temp dir.
+/// A no-isolation backend: commands run as host subprocesses in a temp dir. Provides NO isolation
+/// and must not be used for adversarial code; use the container backend for that.
 pub(crate) struct LocalSandbox {
     root: TempDir,
     max_output_bytes: Option<usize>,
@@ -51,6 +52,36 @@ fn resolve(root: &Path, path: &Path) -> PathBuf {
     root.join(path.strip_prefix("/").unwrap_or(path))
 }
 
+/// Read a stream into a buffer, appending only up to `max` bytes but draining the rest so the
+/// child never blocks on a full pipe. Returns the buffer and whether bytes were discarded.
+async fn read_capped<R: tokio::io::AsyncRead + Unpin>(
+    mut reader: R,
+    max: Option<usize>,
+) -> std::io::Result<(Vec<u8>, bool)> {
+    use tokio::io::AsyncReadExt;
+    let mut buf = Vec::new();
+    let mut truncated = false;
+    let mut chunk = [0u8; 8192];
+    loop {
+        let n = reader.read(&mut chunk).await?;
+        if n == 0 {
+            break;
+        }
+        match max {
+            Some(m) if buf.len() >= m => truncated = true,
+            Some(m) => {
+                let take = (m - buf.len()).min(n);
+                buf.extend_from_slice(&chunk[..take]);
+                if take < n {
+                    truncated = true;
+                }
+            }
+            None => buf.extend_from_slice(&chunk[..n]),
+        }
+    }
+    Ok((buf, truncated))
+}
+
 #[async_trait]
 impl Sandbox for LocalSandbox {
     async fn exec(&self, req: ExecRequest) -> Result<ExecResult> {
@@ -71,15 +102,30 @@ impl Sandbox for LocalSandbox {
 
         let started = Instant::now();
         let mut child = cmd.spawn()?;
-        if let Some(stdin) = req.stdin {
-            if let Some(mut handle) = child.stdin.take() {
-                handle.write_all(&stdin).await?;
-            }
+        if let Some(stdin) = req.stdin
+            && let Some(mut handle) = child.stdin.take()
+        {
+            handle.write_all(&stdin).await?;
         }
 
+        let stdout_pipe = child.stdout.take().expect("stdout is piped");
+        let stderr_pipe = child.stderr.take().expect("stderr is piped");
+        let max = self.max_output_bytes;
+        let run = async {
+            let (out, err, status) = tokio::join!(
+                read_capped(stdout_pipe, max),
+                read_capped(stderr_pipe, max),
+                child.wait(),
+            );
+            let (stdout, cut_out) = out?;
+            let (stderr, cut_err) = err?;
+            let exit_code = status?.code().unwrap_or(-1);
+            Ok::<_, Error>((stdout, stderr, cut_out || cut_err, exit_code))
+        };
+
         let timeout = req.timeout.or(self.default_timeout);
-        let output = match timeout {
-            Some(limit) => match tokio::time::timeout(limit, child.wait_with_output()).await {
+        let (stdout, stderr, truncated, exit_code) = match timeout {
+            Some(limit) => match tokio::time::timeout(limit, run).await {
                 Ok(res) => res?,
                 Err(_) => {
                     return Ok(ExecResult {
@@ -91,16 +137,14 @@ impl Sandbox for LocalSandbox {
                     });
                 }
             },
-            None => child.wait_with_output().await?,
+            None => run.await?,
         };
 
-        let (stdout, cut_out) = truncate(output.stdout, self.max_output_bytes);
-        let (stderr, cut_err) = truncate(output.stderr, self.max_output_bytes);
         Ok(ExecResult {
-            exit_code: output.status.code().unwrap_or(-1),
+            exit_code,
             stdout,
             stderr,
-            truncated: cut_out || cut_err,
+            truncated,
             duration: started.elapsed(),
         })
     }
