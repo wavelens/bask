@@ -28,6 +28,8 @@ download = ["io", "bask-io/download"]
 object-store = ["io", "bask-io/object-store"]
 postgres = ["formats", "bask-formats/postgres"]
 agents = ["dep:bask-agents"]
+sandbox = ["agents", "bask-agents/sandbox"]
+sandbox-container = ["sandbox", "bask-agents/sandbox-container"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
@@ -63,6 +65,10 @@ required-features = ["formats"]
 [[example]]
 name = "agent"
 required-features = ["agents"]
+
+[[example]]
+name = "agent_sandbox"
+required-features = ["sandbox"]
 
 [package.metadata.docs.rs]
 all-features = true
