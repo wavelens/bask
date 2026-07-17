@@ -82,7 +82,9 @@ pub(crate) async fn execute(
             )?;
             let mut req = ExecRequest::new(command);
             if let Some(secs) = args.get("timeout_secs").and_then(|v| v.as_f64()) {
-                req.timeout = Some(std::time::Duration::from_secs_f64(secs));
+                if let Ok(duration) = std::time::Duration::try_from_secs_f64(secs) {
+                    req.timeout = Some(duration);
+                }
             }
             let result = sandbox.exec(req).await?;
             Ok(json!({
@@ -116,5 +118,40 @@ pub(crate) async fn execute(
             Ok(json!({ "contents": String::from_utf8_lossy(&bytes) }).to_string())
         }
         other => Err(anyhow::anyhow!("unknown built-in tool {other}")),
+    }
+}
+
+#[cfg(all(test, feature = "sandbox"))]
+mod tests {
+    use super::*;
+    use bask_sandbox::SandboxSpec;
+
+    #[tokio::test]
+    async fn run_command_ignores_invalid_timeout_secs() {
+        let sandbox = bask_sandbox::spawn(&SandboxSpec::default()).await.unwrap();
+
+        let result = execute(
+            &*sandbox,
+            "run_command",
+            json!({"command": ["true"], "timeout_secs": -1.0}),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "negative timeout_secs must not panic: {result:?}"
+        );
+
+        let result = execute(
+            &*sandbox,
+            "run_command",
+            json!({"command": ["true"], "timeout_secs": 1e300}),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "overflowing timeout_secs must not panic: {result:?}"
+        );
+
+        sandbox.teardown().await.unwrap();
     }
 }
