@@ -12,6 +12,8 @@ mod config;
 mod error;
 mod registry;
 mod render;
+#[cfg(feature = "sandbox")]
+mod tools;
 
 pub use inventory;
 
@@ -21,3 +23,6 @@ pub use config::Agents;
 pub use error::{Error, Result};
 pub use registry::{AgentTask, AgentTaskInfo};
 pub use render::render_task;
+
+#[cfg(feature = "sandbox")]
+pub use bask_sandbox::{Isolation, Limits, Network, SandboxSpec, SeedFile};

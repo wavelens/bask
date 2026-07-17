@@ -19,6 +19,11 @@ thiserror = "2"
 anyhow = "1"
 async-trait = "0.1"
 async-openai = { version = "0.41", features = ["chat-completion"] }
+bask-sandbox = { workspace = true, optional = true }
+
+[features]
+sandbox = ["dep:bask-sandbox"]
+sandbox-container = ["sandbox", "bask-sandbox/container"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

@@ -444,6 +444,7 @@ dependencies = [
  "async-trait",
  "bask-agents-macros",
  "bask-core",
+ "bask-sandbox",
  "futures",
  "inventory",
  "schemars 1.2.1",
