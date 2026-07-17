@@ -107,10 +107,11 @@ async fn network_is_denied_by_default() {
         return;
     }
 
-    let bash = "exec 3<>/dev/tcp/1.1.1.1/80 && echo OPEN || echo BLOCKED";
+    // Run bash via `sh -c` so a missing bash leaves stdout empty (skip) rather than erroring.
+    let bash = "bash -c 'exec 3<>/dev/tcp/1.1.1.1/80 && echo OPEN || echo BLOCKED'";
     let out = sb
         .exec(ExecRequest::new(vec![
-            "bash".into(),
+            "sh".into(),
             "-c".into(),
             bash.into(),
         ]))
