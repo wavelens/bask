@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use tempfile::TempDir;
@@ -20,7 +20,7 @@ use crate::{Error, Result, Sandbox};
 pub(crate) struct LocalSandbox {
     root: TempDir,
     max_output_bytes: Option<usize>,
-    default_timeout: Option<std::time::Duration>,
+    default_timeout: Option<Duration>,
     env: Vec<(String, String)>,
 }
 
@@ -66,7 +66,8 @@ impl Sandbox for LocalSandbox {
         cmd.envs(self.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
 
         let started = Instant::now();
         let mut child = cmd.spawn()?;

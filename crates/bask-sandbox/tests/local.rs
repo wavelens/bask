@@ -52,6 +52,38 @@ async fn times_out_to_124() {
 }
 
 #[tokio::test]
+async fn timeout_kills_child() {
+    let marker = std::env::temp_dir().join(format!("bask_kill_marker_{}", std::process::id()));
+    if marker.exists() {
+        std::fs::remove_file(&marker).unwrap();
+    }
+
+    let mut spec = local_spec();
+    spec.limits = Limits {
+        timeout: Some(Duration::from_millis(100)),
+        ..Limits::default()
+    };
+    let sb = spawn(&spec).await.unwrap();
+    let out = sb
+        .exec(ExecRequest::new(vec![
+            "sh".into(),
+            "-c".into(),
+            format!("sleep 1; printf x > {}", marker.display()),
+        ]))
+        .await
+        .unwrap();
+    assert_eq!(out.exit_code, 124);
+
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    let survived = marker.exists();
+    if marker.exists() {
+        std::fs::remove_file(&marker).unwrap();
+    }
+    assert!(!survived, "child process was not killed on timeout");
+}
+
+#[tokio::test]
 async fn truncates_output() {
     let mut spec = local_spec();
     spec.limits = Limits {
