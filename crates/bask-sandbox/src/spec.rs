@@ -11,8 +11,8 @@ use std::time::Duration;
 /// Isolation strength the caller declares; `spawn` selects a backend that satisfies it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Isolation {
-    #[default]
     Local,
+    #[default]
     OsSandbox,
     Container,
 }
@@ -58,7 +58,7 @@ pub struct SandboxSpec {
 impl Default for SandboxSpec {
     fn default() -> Self {
         SandboxSpec {
-            isolation: Isolation::Local,
+            isolation: Isolation::OsSandbox,
             image: None,
             workdir: PathBuf::from("/work"),
             env: BTreeMap::new(),
@@ -108,7 +108,7 @@ mod tests {
     #[test]
     fn spec_defaults_are_secure() {
         let spec = SandboxSpec::default();
-        assert_eq!(spec.isolation, Isolation::Local);
+        assert_eq!(spec.isolation, Isolation::OsSandbox);
         assert_eq!(spec.network, Network::None);
         assert!(spec.image.is_none());
         assert!(spec.limits.timeout.is_some());
