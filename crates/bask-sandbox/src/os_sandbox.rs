@@ -55,7 +55,7 @@ impl OsSandbox {
         }
         let root = TempDir::new()?;
         for seed in &spec.seed_files {
-            let target = resolve(root.path(), &seed.path);
+            let target = crate::exec_common::resolve(root.path(), &seed.path);
             if let Some(parent) = target.parent() {
                 tokio::fs::create_dir_all(parent).await?;
             }
@@ -70,6 +70,8 @@ impl OsSandbox {
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
+            // Daemonless and all-or-nothing: Bridge and Host both mean "allow"; they
+            // differ only for the Container backend.
             allow_network: !matches!(spec.network, Network::None),
         })
     }
@@ -82,10 +84,6 @@ impl OsSandbox {
             default_timeout: self.default_timeout,
         }
     }
-}
-
-fn resolve(root: &Path, path: &Path) -> PathBuf {
-    root.join(path.strip_prefix("/").unwrap_or(path))
 }
 
 /// Build the per-exec confinement hook in the PARENT (all allocation and fd opening happens here).
@@ -125,19 +123,19 @@ fn build_confinement(workdir: PathBuf, allow_network: bool) -> Result<PreExecHoo
 
     let mut created = Some(created);
     Ok(Box::new(move || {
-        let rs = created.take().expect("pre_exec hook called once");
+        let rs = match created.take() {
+            Some(rs) => rs,
+            None => return Err(std::io::Error::from(std::io::ErrorKind::Other)),
+        };
         let status = rs
             .restrict_self()
-            .map_err(|e| std::io::Error::other(format!("landlock: {e}")))?;
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::PermissionDenied))?;
         if status.ruleset == RulesetStatus::NotEnforced {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "landlock not enforced; refusing to run unconfined",
-            ));
+            return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
         }
         if let Some(bpf) = &bpf {
             seccompiler::apply_filter(bpf)
-                .map_err(|e| std::io::Error::other(format!("seccomp: {e}")))?;
+                .map_err(|_| std::io::Error::from(std::io::ErrorKind::PermissionDenied))?;
         }
         Ok(())
     }))
@@ -197,7 +195,7 @@ impl Sandbox for OsSandbox {
     }
 
     async fn write_file(&self, path: &Path, contents: &[u8]) -> Result<()> {
-        let target = resolve(self.root.path(), path);
+        let target = crate::exec_common::resolve(self.root.path(), path);
         if let Some(parent) = target.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
@@ -206,7 +204,7 @@ impl Sandbox for OsSandbox {
     }
 
     async fn read_file(&self, path: &Path) -> Result<Vec<u8>> {
-        Ok(tokio::fs::read(resolve(self.root.path(), path)).await?)
+        Ok(tokio::fs::read(crate::exec_common::resolve(self.root.path(), path)).await?)
     }
 
     async fn teardown(self: Box<Self>) -> Result<()> {

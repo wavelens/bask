@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Sandboxed command execution for bask: a pluggable Sandbox trait with Local and Container backends"
+description = "Sandboxed command execution for bask: a pluggable Sandbox trait with Local, OsSandbox, and Container backends"
 
 [dependencies]
 async-trait = "0.1"

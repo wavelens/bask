@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: MIT OR Apache-2.0
  */
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -27,7 +27,7 @@ impl LocalSandbox {
     pub(crate) async fn spawn(spec: &SandboxSpec) -> Result<Self> {
         let root = TempDir::new()?;
         for seed in &spec.seed_files {
-            let target = resolve(root.path(), &seed.path);
+            let target = crate::exec_common::resolve(root.path(), &seed.path);
             if let Some(parent) = target.parent() {
                 tokio::fs::create_dir_all(parent).await?;
             }
@@ -55,10 +55,6 @@ impl LocalSandbox {
     }
 }
 
-fn resolve(root: &Path, path: &Path) -> PathBuf {
-    root.join(path.strip_prefix("/").unwrap_or(path))
-}
-
 #[async_trait]
 impl Sandbox for LocalSandbox {
     async fn exec(&self, req: ExecRequest) -> Result<ExecResult> {
@@ -66,7 +62,7 @@ impl Sandbox for LocalSandbox {
     }
 
     async fn write_file(&self, path: &Path, contents: &[u8]) -> Result<()> {
-        let target = resolve(self.root.path(), path);
+        let target = crate::exec_common::resolve(self.root.path(), path);
         if let Some(parent) = target.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
@@ -75,7 +71,7 @@ impl Sandbox for LocalSandbox {
     }
 
     async fn read_file(&self, path: &Path) -> Result<Vec<u8>> {
-        Ok(tokio::fs::read(resolve(self.root.path(), path)).await?)
+        Ok(tokio::fs::read(crate::exec_common::resolve(self.root.path(), path)).await?)
     }
 
     async fn teardown(self: Box<Self>) -> Result<()> {
